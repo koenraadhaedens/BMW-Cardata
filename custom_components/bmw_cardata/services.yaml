@@ -1,0 +1,3 @@
+refresh_data:
+  name: Refresh BMW CarData
+  description: Force an immediate refresh for all configured BMW CarData entries.

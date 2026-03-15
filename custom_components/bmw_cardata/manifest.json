@@ -1,0 +1,18 @@
+{
+  "domain": "bmw_cardata",
+  "name": "BMW CarData",
+  "codeowners": [
+    "@koenraadhaedens"
+  ],
+  "config_flow": true,
+  "documentation": "https://github.com/koenraadhaedens/bmw-cardata-homeassistant",
+  "issue_tracker": "https://github.com/koenraadhaedens/bmw-cardata-homeassistant/issues",
+  "requirements": [
+    "aiomqtt>=2.1.0"
+  ],
+  "iot_class": "cloud_polling",
+  "version": "0.0.16",
+  "loggers": [
+    "custom_components.bmw_cardata"
+  ]
+}

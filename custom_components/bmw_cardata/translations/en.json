@@ -1,0 +1,126 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "BMW CarData",
+        "description": "Enter your BMW CarData Client ID from My BMW > CarData.",
+        "data": {
+          "client_id": "Client ID",
+          "use_streaming": "Use MQTT streaming",
+          "stream_topic": "Stream topic"
+        }
+      },
+      "authorize": {
+        "title": "Authorize Device",
+        "description": "1. Open: {verification_uri}\n2. Enter code: {user_code}\n3. Or use direct link: {verification_uri_complete}\n4. Return here and click submit.\n\nCode expires in {expires_in} seconds.",
+        "data": {}
+      },
+      "init": {
+        "title": "BMW CarData Options",
+        "description": "Configure optional MQTT streaming mode.",
+        "data": {
+          "use_streaming": "Use MQTT streaming",
+          "stream_topic": "Stream topic"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to BMW OAuth service.",
+      "authorization_pending": "Authorization is not completed yet. Finish authorization on BMW website and retry.",
+      "slow_down": "Polling too fast. Wait a few seconds and try again.",
+      "expired_token": "Device code expired. Restart setup.",
+      "access_denied": "Authorization was denied on BMW website.",
+      "invalid_client": "Client ID is invalid or not activated.",
+      "invalid_request": "Invalid request sent to BMW OAuth service.",
+      "unknown_oauth_error": "BMW OAuth returned an unknown error.",
+      "invalid_stream_port": "Stream port must be a valid number."
+    },
+    "abort": {
+      "already_configured": "This BMW account is already configured.",
+      "missing_flow_state": "Flow state was lost. Restart setup."
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "doors_closed": {
+        "name": "Car Locked"
+      },
+      "is_charging": {
+        "name": "Charging Active"
+      },
+      "is_telematics_capable": {
+        "name": "Telematics Capable"
+      },
+      "has_navi": {
+        "name": "Has Navigation"
+      },
+      "has_sun_roof": {
+        "name": "Has Sun Roof"
+      }
+    },
+    "sensor": {
+      "mapped_vehicles": {
+        "name": "Mapped Vehicles"
+      },
+      "stream_startup_bootstrap": {
+        "name": "Stream Startup Bootstrap"
+      },
+      "mapping_type": {
+        "name": "Mapping Type"
+      },
+      "model_name": {
+        "name": "Model Name"
+      },
+      "brand": {
+        "name": "Brand"
+      },
+      "series": {
+        "name": "Series"
+      },
+      "model_range": {
+        "name": "Model Range"
+      },
+      "drive_train": {
+        "name": "Drive Train"
+      },
+      "propulsion_type": {
+        "name": "Propulsion Type"
+      },
+      "battery_level": {
+        "name": "Battery Level"
+      },
+      "charging_status": {
+        "name": "Charging Status"
+      },
+      "fuel_level": {
+        "name": "Fuel Level"
+      },
+      "remaining_range": {
+        "name": "Remaining Range"
+      },
+      "current_latitude": {
+        "name": "Current Latitude"
+      },
+      "current_longitude": {
+        "name": "Current Longitude"
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "BMW CarData Options",
+        "description": "Configure optional MQTT streaming mode.",
+        "data": {
+          "use_streaming": "Use MQTT streaming",
+          "stream_host": "Stream host",
+          "stream_port": "Stream port",
+          "stream_topic": "Stream topic"
+        }
+      }
+    },
+    "error": {
+      "invalid_stream_port": "Stream port must be a valid number."
+    }
+  }
+}
