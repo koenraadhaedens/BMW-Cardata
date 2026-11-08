@@ -96,6 +96,19 @@ VEHICLE_SENSORS: tuple[VehicleSensorDescription, ...] = (
         ),
     ),
     VehicleSensorDescription(
+        key="total_remaining_range",
+        translation_key="total_remaining_range",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        native_unit_of_measurement="km",
+        device_class=SensorDeviceClass.DISTANCE,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda _mapping, _basic, telematic: _find_numeric_telematic_value(
+            telematic,
+            (),
+            exact_keys=("vehicle.drivetrain.lastRemainingRange",),
+        ),
+    ),
+    VehicleSensorDescription(
         key="electric_remaining_range",
         entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda _mapping, _basic, telematic: _find_numeric_telematic_value(

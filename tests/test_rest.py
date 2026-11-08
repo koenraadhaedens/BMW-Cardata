@@ -96,7 +96,7 @@ def load_modules():
         "homeassistant.components.sensor": {
             "SensorEntity": type("SensorEntity", (), {}),
             "SensorEntityDescription": SensorDescription,
-            "SensorDeviceClass": SimpleNamespace(BATTERY="battery"),
+            "SensorDeviceClass": SimpleNamespace(BATTERY="battery", DISTANCE="distance"),
             "SensorStateClass": SimpleNamespace(MEASUREMENT="measurement"),
         },
     }
@@ -240,6 +240,39 @@ class RestTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             set(self.coordinator.data[C.CONF_REST_DATA_BY_VIN][VIN]), set(C.REST_SENSOR_KEYS)
         )
+
+    async def test_total_remaining_range_uses_combined_mqtt_value_not_other_ranges(self):
+        self.stream.async_get_telematic_snapshot.return_value = {VIN: {
+            "vehicle.drivetrain.lastRemainingRange": {"value": "520.5", "unit": "km"},
+            "vehicle.drivetrain.totalRemainingRange": {"value": "600"},
+            "vehicle.drivetrain.electricEngine.kombiRemainingElectricRange": {"value": "33"},
+        }}
+        await self.coordinator.async_apply_stream_snapshot()
+        self.assertEqual(self.sensor("total_remaining_range").native_value, 520.5)
+        self.assertEqual(self.sensor("electric_remaining_range").native_value, 33)
+        self.api.async_get_telematic_data.assert_not_awaited()
+        self.api.async_list_containers.assert_not_awaited()
+
+    async def test_total_remaining_range_is_unknown_when_combined_mqtt_field_is_missing(self):
+        self.coordinator._rest_data_by_vin[VIN] = {
+            "vehicle.drivetrain.lastRemainingRange": {"value": "999"},
+        }
+        self.stream.async_get_telematic_snapshot.return_value = {VIN: {
+            "vehicle.drivetrain.totalRemainingRange": {"value": "600"},
+            "vehicle.drivetrain.electricEngine.kombiRemainingElectricRange": {"value": "33"},
+        }}
+        await self.coordinator.async_apply_stream_snapshot()
+        self.assertIsNone(self.sensor("total_remaining_range").native_value)
+
+    async def test_total_remaining_range_tracks_updates_zero_and_unavailable_values(self):
+        for value, expected in (("100", 100), ("0", 0), (None, None), ("INVALID", None)):
+            with self.subTest(value=value):
+                self.stream.async_get_telematic_snapshot.return_value = {VIN: {
+                    "vehicle.drivetrain.lastRemainingRange": {"value": value},
+                }}
+                await self.coordinator.async_apply_stream_snapshot()
+                self.assertEqual(self.sensor("total_remaining_range").native_value, expected)
+        self.api.async_get_telematic_data.assert_not_awaited()
 
     async def test_rate_limit_persists_until_utc_day_changes_without_stopping_mqtt(self):
         self.api.async_get_telematic_data.side_effect = MODULES.api.BmwCarDataRateLimitError("quota")

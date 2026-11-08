@@ -12,6 +12,9 @@ Custom Home Assistant integration for BMW CarData authentication using OAuth2 De
 - Exchanges the authorized device code for BMW tokens and stores them in the config entry.
 - Automatically refreshes expired/expiring access tokens using the refresh token.
 - Creates sensors, binary sensors, and device trackers from incoming MQTT telematics.
+- Adds Total Remaining Range from MQTT `vehicle.drivetrain.lastRemainingRange`:
+  the vehicle's last reported combined electric + fuel range for plug-in hybrids.
+  It remains unknown until BMW publishes the field and uses no extra REST calls.
 - Optionally reads battery level, charging status and charging method through BMW CarData REST.
 - Automatically reuses the newest compatible active REST container, or creates a
   minimal container when none is compatible. Existing containers are never changed or deleted.

@@ -74,6 +74,9 @@
       "remaining_range": {
         "name": "Remaining Range"
       },
+      "total_remaining_range": {
+        "name": "Total Remaining Range"
+      },
       "current_latitude": {
         "name": "Current Latitude"
       },
