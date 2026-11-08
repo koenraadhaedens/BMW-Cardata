@@ -7,8 +7,9 @@ from dataclasses import dataclass
 import hashlib
 import secrets
 from typing import Any
+from urllib.parse import quote, urlencode
 
-from aiohttp import ClientResponseError, ClientSession
+from aiohttp import ClientError, ClientSession, ClientTimeout
 
 from .const import (
     DEVICE_CODE_GRANT_TYPE,
@@ -17,6 +18,7 @@ from .const import (
     OAUTH_BASE_URL,
     PKCE_CHALLENGE_METHOD,
     REFRESH_TOKEN_GRANT_TYPE,
+    REST_BASE_URL,
     TOKEN_PATH,
 )
 
@@ -27,6 +29,61 @@ class BmwCarDataAuthError(Exception):
 
 class BmwCarDataApiError(BmwCarDataAuthError):
     """Unexpected API error."""
+
+
+class BmwCarDataRestAuthError(BmwCarDataApiError):
+    """REST access is unauthorized."""
+
+
+class BmwCarDataRateLimitError(BmwCarDataApiError):
+    """BMW's daily REST quota has been exhausted."""
+
+
+class BmwCarDataRestApi:
+    """Read vehicle snapshots without creating or changing containers."""
+
+    def __init__(self, session: ClientSession) -> None:
+        self._session = session
+
+    async def async_get_telematic_data(
+        self, *, access_token: str, vin: str, container_id: str
+    ) -> dict[str, dict[str, Any]]:
+        """Read the latest stored telematics for a vehicle and container."""
+        url = (
+            f"{REST_BASE_URL}/customers/vehicles/{quote(vin, safe='')}/telematicData?"
+            f"{urlencode({'containerId': container_id})}"
+        )
+        try:
+            async with self._session.get(
+                url,
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "x-version": "v1",
+                    "Accept": "application/json",
+                },
+                timeout=ClientTimeout(total=30),
+            ) as response:
+                if response.status in (401, 403):
+                    raise BmwCarDataRestAuthError(
+                        "BMW REST access denied; check API subscription and authorization"
+                    )
+                if response.status == 429:
+                    raise BmwCarDataRateLimitError("BMW daily REST quota exhausted")
+                if response.status >= 400:
+                    raise BmwCarDataApiError(
+                        f"BMW REST request failed with HTTP {response.status}"
+                    )
+                data = await response.json(content_type=None)
+        except (ClientError, TimeoutError, ValueError) as err:
+            raise BmwCarDataApiError("BMW REST request or JSON decoding failed") from err
+
+        telematic = data.get("telematicData") if isinstance(data, dict) else None
+        if not isinstance(telematic, dict) or any(
+            not isinstance(key, str) or not isinstance(value, dict)
+            for key, value in telematic.items()
+        ):
+            raise BmwCarDataApiError("BMW REST returned invalid telematic data")
+        return telematic
 
 
 class BmwCarDataOAuthError(BmwCarDataAuthError):
@@ -188,5 +245,5 @@ class BmwCarDataAuthApi:
                 if not isinstance(data, dict):
                     raise BmwCarDataApiError("Unexpected non-JSON object response")
                 return data
-        except ClientResponseError as err:
-            raise BmwCarDataApiError("HTTP client response error") from err
+        except (ClientError, TimeoutError, ValueError) as err:
+            raise BmwCarDataApiError("OAuth request or JSON decoding failed") from err

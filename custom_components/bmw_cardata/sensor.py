@@ -6,7 +6,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from homeassistant.components.sensor import SensorEntity, SensorEntityDescription
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorEntityDescription,
+    SensorStateClass,
+)
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
@@ -16,9 +21,14 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import (
     CONF_BASIC_DATA_BY_VIN,
     CONF_MAPPINGS,
+    CONF_REST_AVAILABLE_BY_VIN,
+    CONF_REST_DATA_BY_VIN,
     CONF_TELEMATIC_DATA_BY_VIN,
     DATA_ENTRIES,
     DOMAIN,
+    REST_BATTERY_LEVEL,
+    REST_CHARGING_METHOD,
+    REST_CHARGING_STATUS,
 )
 from .coordinator import BmwCarDataCoordinator
 
@@ -27,6 +37,7 @@ from .coordinator import BmwCarDataCoordinator
 class VehicleSensorDescription(SensorEntityDescription):
     """Description of a VIN-level sensor."""
 
+    rest_key: str | None = None
     value_fn: Callable[
         [dict[str, Any], dict[str, Any], dict[str, dict[str, Any]]],
         str | int | float | None,
@@ -103,6 +114,10 @@ VEHICLE_SENSORS: tuple[VehicleSensorDescription, ...] = (
     VehicleSensorDescription(
         key="battery_soc",
         translation_key="battery_soc",
+        rest_key=REST_BATTERY_LEVEL,
+        native_unit_of_measurement="%",
+        device_class=SensorDeviceClass.BATTERY,
+        state_class=SensorStateClass.MEASUREMENT,
         entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda _mapping, _basic, telematic: _find_battery_level_value(telematic),
     ),
@@ -119,6 +134,7 @@ VEHICLE_SENSORS: tuple[VehicleSensorDescription, ...] = (
     VehicleSensorDescription(
         key="charging_status",
         translation_key="charging_status",
+        rest_key=REST_CHARGING_STATUS,
         entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda _mapping, _basic, telematic: _find_text_telematic_value(
             telematic,
@@ -138,6 +154,15 @@ VEHICLE_SENSORS: tuple[VehicleSensorDescription, ...] = (
                 ("charging", "status"),
                 ("charging", "connection"),
             ),
+        ),
+    ),
+    VehicleSensorDescription(
+        key="charging_method",
+        translation_key="charging_method",
+        rest_key=REST_CHARGING_METHOD,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda _mapping, _basic, telematic: _find_text_telematic_value(
+            telematic, exact_keys=(REST_CHARGING_METHOD,)
         ),
     ),
     VehicleSensorDescription(
@@ -224,6 +249,8 @@ async def async_setup_entry(
                 continue
 
             for description in VEHICLE_SENSORS:
+                if description.key == "charging_method" and not coordinator.use_rest:
+                    continue
                 unique_id = f"{entry.entry_id}_{vin}_{description.key}"
                 if unique_id in known_unique_ids:
                     continue
@@ -311,8 +338,25 @@ class BmwCarDataVehicleSensor(CoordinatorEntity[BmwCarDataCoordinator], SensorEn
         self._attr_name = f"{vin} {description.key.replace('_', ' ').title()}"
 
     @property
+    def available(self) -> bool:
+        """REST failures must not make unrelated MQTT entities unavailable."""
+        if self.coordinator.use_rest and self.entity_description.rest_key:
+            data = self.coordinator.data or {}
+            return data.get(CONF_REST_AVAILABLE_BY_VIN, {}).get(self._vin, False)
+        return super().available
+
+    @property
     def native_value(self) -> str | int | float | None:
         """Return sensor state."""
+        rest_key = self.entity_description.rest_key
+        if self.coordinator.use_rest and rest_key:
+            data = self.coordinator.data or {}
+            telematic = data.get(CONF_REST_DATA_BY_VIN, {}).get(self._vin, {})
+            value = telematic.get(rest_key, {}).get("value")
+            if rest_key == REST_BATTERY_LEVEL:
+                return _to_float(value)
+            return _extract_text_value(value)
+
         mappings = self.coordinator.data.get(CONF_MAPPINGS, []) if self.coordinator.data else []
         basic_data_by_vin = (
             self.coordinator.data.get(CONF_BASIC_DATA_BY_VIN, {}) if self.coordinator.data else {}
@@ -342,6 +386,15 @@ class BmwCarDataVehicleSensor(CoordinatorEntity[BmwCarDataCoordinator], SensorEn
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return extra state attributes."""
+        rest_key = self.entity_description.rest_key
+        if self.coordinator.use_rest and rest_key:
+            data = self.coordinator.data or {}
+            telematic = data.get(CONF_REST_DATA_BY_VIN, {}).get(self._vin, {})
+            return {
+                "vin": self._vin,
+                "source": "rest",
+                "timestamp": telematic.get(rest_key, {}).get("timestamp"),
+            }
         return {"vin": self._vin}
 
 

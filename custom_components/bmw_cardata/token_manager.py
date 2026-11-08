@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 from homeassistant.config_entries import ConfigEntry
@@ -28,6 +29,7 @@ class BmwCarDataTokenManager:
         self._hass = hass
         self._entry = entry
         self._auth_api = auth_api
+        self._refresh_lock = asyncio.Lock()
 
     async def async_get_access_token(self) -> str:
         """Return a valid access token, refreshing if needed."""
@@ -60,6 +62,14 @@ class BmwCarDataTokenManager:
 
     async def _async_refresh_tokens(self) -> dict:
         """Refresh tokens and persist updated entry data."""
+        previous_refresh_token = self._entry.data.get(CONF_REFRESH_TOKEN)
+        async with self._refresh_lock:
+            if self._entry.data.get(CONF_REFRESH_TOKEN) != previous_refresh_token:
+                return dict(self._entry.data)
+            return await self._async_refresh_tokens_locked()
+
+    async def _async_refresh_tokens_locked(self) -> dict:
+        """Refresh once when MQTT and REST request tokens concurrently."""
         token_response = await self._auth_api.refresh_token(
             client_id=self._entry.data[CONF_CLIENT_ID],
             refresh_token=self._entry.data[CONF_REFRESH_TOKEN],

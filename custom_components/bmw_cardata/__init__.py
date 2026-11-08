@@ -10,7 +10,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .api import BmwCarDataAuthApi
+from .api import BmwCarDataAuthApi, BmwCarDataRestApi
 from .const import (
     CONF_VERBOSE_LOGGING,
     DATA_ENTRIES,
@@ -89,6 +89,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass,
         entry=entry,
         stream_manager=stream_manager,
+        rest_api=BmwCarDataRestApi(session),
+        token_manager=token_manager,
     )
     await coordinator.async_initialize()
 
@@ -96,10 +98,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "coordinator": coordinator,
         "token_manager": token_manager,
         "stream_manager": stream_manager,
+        "options": dict(entry.options),
     }
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    entry.async_on_unload(entry.add_update_listener(_async_options_updated))
     return True
+
+
+async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Apply changes to REST and MQTT options."""
+    runtime = hass.data[DOMAIN][DATA_ENTRIES][entry.entry_id]
+    if runtime["options"] != dict(entry.options):
+        await hass.config_entries.async_reload(entry.entry_id)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
