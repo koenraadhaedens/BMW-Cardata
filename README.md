@@ -115,6 +115,26 @@ until a successful refresh; old readings are not used to hide a connection or qu
 failure. Existing installations without saved readings must wait for one successful
 refresh before this restoration is available. Missing values remain unknown.
 
+Each discovered vehicle has a **Refresh REST data** button when REST is enabled.
+Press it to fetch all three REST readings immediately for that vehicle, bypassing
+its two-hour cooldown. The button remains usable when REST sensors are unavailable
+and reports request, authorization, or quota errors in Home Assistant.
+Manual requests share the persisted 50-call daily budget with automatic polling
+and cannot bypass BMW's quota block. Normally one press uses one snapshot call;
+container discovery or creation can use additional calls. A manual attempt also
+starts a new two-hour automatic cooldown for that vehicle, including after a failed
+snapshot request. Other vehicles and MQTT are unaffected. BMW still returns its
+latest stored values; this button does not wake the car or command a live measurement.
+
+For unavailable REST sensors, enable verbose logging in integration options. The
+integration log reports whether polling is waiting for MQTT vehicle discovery,
+reauthorization, the daily quota reset, or a per-vehicle cooldown. Cooldown entries
+include the earliest eligible request time and whether saved readings exist; times
+use UTC (`+00:00`). The periodic check runs every two hours from setup/reload, so
+eligibility does not mean a request runs immediately. The log also reports the next
+periodic check, local request counts and successful snapshots without logging tokens
+or REST reading values. Do not reset the integration or its counter to force retries.
+
 ## Tests
 
 With `aiohttp` and `voluptuous` available, run `python -m unittest discover -s tests -v`.

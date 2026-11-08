@@ -44,6 +44,13 @@ class CoordinatorEntity:
         return self.coordinator.last_update_success
 
 
+class HomeAssistantError(Exception):
+    def __init__(self, *, translation_domain, translation_key, translation_placeholders):
+        super().__init__(translation_placeholders["reason"])
+        self.translation_domain = translation_domain
+        self.translation_key = translation_key
+
+
 @dataclass(frozen=True, kw_only=True)
 class SensorDescription:
     key: str
@@ -84,9 +91,10 @@ def load_modules():
             "ConfigEntry": object, "ConfigFlow": ConfigFlow, "OptionsFlow": ConfigFlow,
         },
         "homeassistant.core": {"HomeAssistant": object, "callback": lambda fn: fn},
+        "homeassistant.exceptions": {"HomeAssistantError": HomeAssistantError},
         "homeassistant.const": {
             "CONF_CLIENT_ID": "client_id",
-            "EntityCategory": SimpleNamespace(DIAGNOSTIC="diagnostic"),
+            "EntityCategory": SimpleNamespace(DIAGNOSTIC="diagnostic", CONFIG="config"),
         },
         "homeassistant.helpers.update_coordinator": {
             "DataUpdateCoordinator": Coordinator, "CoordinatorEntity": CoordinatorEntity,
@@ -107,6 +115,7 @@ def load_modules():
             "BinarySensorEntity": type("BinarySensorEntity", (), {}),
             "BinarySensorEntityDescription": SensorDescription,
         },
+        "homeassistant.components.button": {"ButtonEntity": type("ButtonEntity", (), {})},
     }
     modules = {}
     for name, values in interfaces.items():
@@ -129,7 +138,7 @@ def load_modules():
     with patch.dict(sys.modules, modules):
         for name in (
             "const", "api", "token_manager", "stream_manager", "coordinator",
-            "sensor", "binary_sensor", "config_flow", "integration",
+            "sensor", "binary_sensor", "button", "config_flow", "integration",
         ):
             full_name = f"custom_components.bmw_cardata.{name}"
             path = ROOT / ("__init__.py" if name == "integration" else f"{name}.py")
@@ -287,14 +296,178 @@ class RestTests(unittest.IsolatedAsyncioTestCase):
             "container_id": "test-container", "container_checked_date": "2026-01-01",
         }
         self.coordinator = self.make_coordinator()
-        await self.coordinator.async_initialize()
+        Clock.current += timedelta(minutes=30)
+        with self.assertLogs(MODULES.coordinator.__name__, level="DEBUG") as logs:
+            await self.coordinator.async_initialize()
+        output = "\n".join(logs.output)
+        self.assertIn("eligible at 2026-01-01T02:00:00+00:00", output)
+        self.assertIn("saved fields=0, available=False", output)
+        self.assertIn("next periodic check at approximately 2026-01-01T02:30:00+00:00", output)
         self.assertFalse(self.sensor("battery_soc").available)
         self.api.async_get_telematic_data.assert_not_awaited()
-        Clock.current += timedelta(hours=2)
-        await self.coordinator.async_refresh_rest()
+        Clock.current += timedelta(hours=1, minutes=30)
+        with self.assertLogs(MODULES.coordinator.__name__, level="DEBUG") as logs:
+            await self.coordinator.async_refresh_rest()
+        output = "\n".join(logs.output)
+        self.assertIn("local calls=2/50", output)
+        self.assertIn("selected fields=3/3", output)
+        self.assertNotIn("test-container", output)
+        self.assertNotIn("NOCHARGING", output)
         self.assertTrue(self.sensor("battery_soc").available)
         self.assertEqual(self.entry.data[C.CONF_REST_DATA_BY_VIN][VIN][C.REST_BATTERY_LEVEL]["value"], "97")
         self.assertEqual(self.entry.data[C.CONF_REST_REQUEST_STATE]["count"], 2)
+
+    async def test_rest_diagnostics_distinguish_discovery_and_persisted_quota_pause(self):
+        self.entry.data[C.CONF_STREAM_TOPIC] = "#"
+        with self.assertLogs(MODULES.coordinator.__name__, level="DEBUG") as logs:
+            await self.coordinator.async_initialize()
+        self.assertIn("waiting for MQTT vehicle discovery", "\n".join(logs.output))
+        self.entry.data[C.CONF_REST_REQUEST_STATE] = {
+            "date": "2026-01-01", "count": 50, "blocked": True,
+            "last_attempt_by_vin": {},
+        }
+        self.entry.data[C.CONF_STREAM_TOPIC] = VIN
+        with self.assertLogs(MODULES.coordinator.__name__, level="DEBUG") as logs:
+            await self.coordinator.async_refresh_rest()
+        self.assertIn("daily quota blocked for 2026-01-01", "\n".join(logs.output))
+        self.tokens.async_get_access_token.assert_not_awaited()
+        self.api.async_get_telematic_data.assert_not_awaited()
+        self.api.async_list_containers.assert_not_awaited()
+        self.assertEqual(self.entry.data[C.CONF_REST_REQUEST_STATE]["count"], 50)
+
+    async def test_manual_rest_refresh_bypasses_only_target_cooldown_and_resets_it(self):
+        other_vin = "WBA00000000000002"
+        self.coordinator._telematic_cache_by_vin[other_vin] = {}
+        await self.coordinator.async_refresh_rest()
+        self.api.async_get_telematic_data.reset_mock()
+        Clock.current += timedelta(minutes=30)
+        self.api.async_get_telematic_data.return_value[C.REST_BATTERY_LEVEL]["value"] = "80"
+        await self.coordinator.async_manual_refresh_rest(VIN)
+        self.api.async_get_telematic_data.assert_awaited_once_with(
+            access_token="test", vin=VIN, container_id="test-container"
+        )
+        self.assertEqual(self.sensor("battery_soc").native_value, 80)
+        state = self.entry.data[C.CONF_REST_REQUEST_STATE]
+        self.assertEqual(state["count"], 5)
+        self.assertEqual(state["last_attempt_by_vin"][VIN], Clock.current.isoformat())
+        self.assertEqual(state["last_attempt_by_vin"][other_vin], "2026-01-01T00:00:00+00:00")
+        self.coordinator = self.make_coordinator()
+        self.api.async_get_telematic_data.reset_mock()
+        Clock.current += timedelta(hours=1, minutes=30)
+        await self.coordinator.async_refresh_rest()
+        self.api.async_get_telematic_data.assert_awaited_once_with(
+            access_token="test", vin=other_vin, container_id="test-container"
+        )
+        Clock.current += timedelta(minutes=30)
+        await self.coordinator.async_refresh_rest()
+        self.assertEqual(self.api.async_get_telematic_data.await_count, 2)
+        self.assertEqual(self.api.async_get_telematic_data.await_args.kwargs["vin"], VIN)
+
+    async def test_manual_rest_refresh_enforces_local_cap_and_http_quota_block(self):
+        await self.coordinator.async_refresh_rest()
+        self.entry.data[C.CONF_REST_REQUEST_STATE]["count"] = 49
+        await self.coordinator.async_manual_refresh_rest(VIN)
+        self.assertEqual(self.entry.data[C.CONF_REST_REQUEST_STATE]["count"], 50)
+        with self.assertRaises(HomeAssistantError) as error:
+            await self.coordinator.async_manual_refresh_rest(VIN)
+        self.assertEqual(error.exception.translation_key, "rest_refresh_failed")
+        self.assertEqual(self.api.async_get_telematic_data.await_count, 2)
+        self.assertFalse(self.sensor("battery_soc").available)
+        self.assertTrue(self.entry.data[C.CONF_REST_REQUEST_STATE]["blocked"])
+        with self.assertRaises(HomeAssistantError):
+            await self.coordinator.async_manual_refresh_rest(VIN)
+        self.assertEqual(self.api.async_get_telematic_data.await_count, 2)
+        Clock.current += timedelta(days=1)
+        self.api.async_get_telematic_data.side_effect = MODULES.api.BmwCarDataRateLimitError(
+            "BMW daily REST quota exhausted (HTTP 429)"
+        )
+        with self.assertRaisesRegex(HomeAssistantError, "429"):
+            await self.coordinator.async_manual_refresh_rest(VIN)
+        self.assertEqual(self.entry.data[C.CONF_REST_REQUEST_STATE]["count"], 3)
+        self.assertTrue(self.entry.data[C.CONF_REST_REQUEST_STATE]["blocked"])
+        with self.assertRaises(HomeAssistantError):
+            await self.coordinator.async_manual_refresh_rest(VIN)
+        self.assertEqual(self.entry.data[C.CONF_REST_REQUEST_STATE]["count"], 3)
+
+    async def test_manual_rest_refresh_surfaces_failure_and_preserves_automatic_cooldown(self):
+        await self.coordinator.async_refresh_rest()
+        Clock.current += timedelta(minutes=30)
+        self.api.async_get_telematic_data.side_effect = MODULES.api.BmwCarDataApiError("offline")
+        button = MODULES.button.BmwCarDataRestRefreshButton(
+            coordinator=self.coordinator, entry=self.entry, vin=VIN
+        )
+        with self.assertRaisesRegex(HomeAssistantError, "offline"):
+            await button.async_press()
+        self.assertFalse(self.sensor("battery_soc").available)
+        self.assertTrue(button.available)
+        self.coordinator = self.make_coordinator()
+        await self.coordinator.async_refresh_rest()
+        self.assertEqual(self.api.async_get_telematic_data.await_count, 2)
+        self.assertEqual(self.entry.data[C.CONF_REST_REQUEST_STATE]["count"], 4)
+        self.assertFalse(self.sensor("battery_soc").available)
+
+    async def test_manual_rest_refresh_rejects_disabled_scope_and_unknown_vehicle(self):
+        for case, reason in (
+            ("disabled", "disabled"), ("scope", "authorization"), ("unknown", "discovered"),
+        ):
+            with self.subTest(case=case):
+                self.entry.options[C.CONF_USE_REST] = case != "disabled"
+                self.entry.data[C.CONF_SCOPE] = (
+                    C.STREAMING_SCOPE if case == "scope" else f"{C.STREAMING_SCOPE} {C.REST_SCOPE}"
+                )
+                with self.assertRaisesRegex(HomeAssistantError, reason):
+                    await self.coordinator.async_manual_refresh_rest("WBA00000000000002")
+        self.api.async_list_containers.assert_not_awaited()
+        self.api.async_get_telematic_data.assert_not_awaited()
+
+    async def test_manual_rest_button_discovery_deduplicates_and_skips_mqtt_only(self):
+        self.entry.data[C.CONF_STREAM_TOPIC] = "#"
+        self.hass.data[C.DOMAIN] = {C.DATA_ENTRIES: {
+            self.entry.entry_id: {"coordinator": self.coordinator},
+        }}
+        self.coordinator.async_add_listener = Mock()
+        self.coordinator.async_set_updated_data({C.CONF_MAPPINGS: []})
+        add_entities = Mock()
+        await MODULES.button.async_setup_entry(self.hass, self.entry, add_entities)
+        add_entities.assert_not_called()
+        listener = self.coordinator.async_add_listener.call_args.args[0]
+        self.coordinator._telematic_cache_by_vin[VIN] = {}
+        self.coordinator.async_set_updated_data(self.coordinator._build_payload())
+        listener()
+        listener()
+        add_entities.assert_called_once()
+        button = add_entities.call_args.args[0][0]
+        self.assertTrue(button.available)
+        await button.async_press()
+        self.assertEqual(self.sensor("battery_soc").native_value, 97)
+        self.api.async_get_telematic_data.assert_awaited_once()
+        self.entry.options[C.CONF_USE_REST] = False
+        self.assertFalse(button.available)
+        add_entities.reset_mock()
+        await MODULES.button.async_setup_entry(self.hass, self.entry, add_entities)
+        add_entities.assert_not_called()
+
+    async def test_manual_rest_refresh_surfaces_container_and_authorization_failures(self):
+        self.api.async_list_containers.side_effect = MODULES.api.BmwCarDataApiError(
+            "container discovery offline"
+        )
+        with self.assertRaisesRegex(HomeAssistantError, "container discovery offline"):
+            await self.coordinator.async_manual_refresh_rest(VIN)
+        self.api.async_get_telematic_data.assert_not_awaited()
+        self.assertEqual(self.entry.data[C.CONF_REST_REQUEST_STATE]["count"], 1)
+        self.api.async_list_containers.side_effect = None
+        Clock.current += timedelta(hours=2)
+        self.api.async_get_telematic_data.side_effect = MODULES.api.BmwCarDataRestAuthError(
+            "BMW authorization expired"
+        )
+        with self.assertRaisesRegex(HomeAssistantError, "authorization expired"):
+            await self.coordinator.async_manual_refresh_rest(VIN)
+        self.entry.async_start_reauth.assert_called_once_with(self.hass)
+        self.assertFalse(self.sensor("battery_soc").available)
+        self.assertEqual(self.entry.data[C.CONF_REST_REQUEST_STATE]["count"], 4)
+        with self.assertRaisesRegex(HomeAssistantError, "reauthorization"):
+            await self.coordinator.async_manual_refresh_rest(VIN)
+        self.assertEqual(self.entry.data[C.CONF_REST_REQUEST_STATE]["count"], 4)
 
     async def test_rest_cache_rejects_invalid_saved_entries_with_an_error(self):
         self.entry.data[C.CONF_REST_DATA_BY_VIN] = {VIN: {C.REST_BATTERY_LEVEL: "invalid"}}

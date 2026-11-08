@@ -4,7 +4,7 @@ from __future__ import annotations
 
 DOMAIN = "bmw_cardata"
 DATA_ENTRIES = "entries"
-PLATFORMS = ["sensor", "binary_sensor", "device_tracker"]
+PLATFORMS = ["sensor", "binary_sensor", "device_tracker", "button"]
 
 OAUTH_BASE_URL = "https://customer.bmwgroup.com"
 DEVICE_CODE_PATH = "/gcdm/oauth/device/code"

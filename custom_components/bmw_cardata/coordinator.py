@@ -10,6 +10,7 @@ from typing import Any, TypeVar
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.helpers.event import async_track_time_interval
 
@@ -31,6 +32,7 @@ from .const import (
     CONF_TELEMATIC_DATA_BY_VIN,
     CONF_USE_REST,
     DEFAULT_STREAM_TOPIC,
+    DOMAIN,
     REST_DAILY_CALL_LIMIT,
     REST_SCOPE,
     REST_SENSOR_KEYS,
@@ -113,6 +115,12 @@ class BmwCarDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def async_initialize(self) -> None:
         """Publish saved REST readings and start the MQTT listener."""
+        self.logger.debug(
+            "BMW REST initialization: enabled=%s, saved vehicles=%s, available vehicles=%s",
+            self.use_rest,
+            len(self._rest_data_by_vin),
+            sum(self._rest_available_by_vin.values()),
+        )
         self.async_set_updated_data(self._build_payload())
         await self._stream_manager.async_start()
         if self.use_rest:
@@ -132,6 +140,11 @@ class BmwCarDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 async_track_time_interval(
                     self.hass, self.async_refresh_rest, timedelta(hours=REST_UPDATE_HOURS)
                 )
+            )
+            self.logger.debug(
+                "BMW REST next periodic check at approximately %s; new MQTT vehicles "
+                "also trigger a check without bypassing cooldown",
+                (datetime.now(UTC) + timedelta(hours=REST_UPDATE_HOURS)).isoformat(),
             )
 
     async def async_apply_stream_snapshot(self) -> None:
@@ -158,16 +171,42 @@ class BmwCarDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         ):
             self.hass.async_create_task(self.async_refresh_rest())
 
-    async def async_refresh_rest(self, _now: datetime | None = None) -> None:
-        """Poll known VINs at most every two hours, including across reloads."""
-        if (
-            not self.use_rest
-            or self._rest_authorization_failed
-            or REST_SCOPE not in self._entry.data.get(CONF_SCOPE, "").split()
-        ):
+    async def async_manual_refresh_rest(self, vin: str) -> None:
+        """Refresh one vehicle immediately while preserving the shared request budget."""
+        try:
+            await self.async_refresh_rest(manual_vin=vin)
+        except (BmwCarDataApiError, BmwCarDataOAuthError, ValueError) as err:
+            self.logger.warning("BMW manual REST refresh failed for %s: %s", vin, err)
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="rest_refresh_failed",
+                translation_placeholders={"reason": str(err)},
+            ) from err
+
+    async def async_refresh_rest(
+        self, _now: datetime | None = None, *, manual_vin: str | None = None
+    ) -> None:
+        """Poll due VINs, or manually refresh one VIN without bypassing quota."""
+        if not self.use_rest:
+            self.logger.debug("BMW REST poll skipped: REST sensors disabled")
+            if manual_vin is not None:
+                raise BmwCarDataApiError("REST sensors are disabled")
+            return
+        if self._rest_authorization_failed:
+            self.logger.debug("BMW REST poll skipped: reauthorization required")
+            if manual_vin is not None:
+                raise BmwCarDataApiError("BMW REST reauthorization is required")
+            return
+        if REST_SCOPE not in self._entry.data.get(CONF_SCOPE, "").split():
+            self.logger.debug("BMW REST poll skipped: cardata:api:read scope missing")
+            if manual_vin is not None:
+                raise BmwCarDataApiError("BMW REST cardata:api:read authorization is missing")
             return
         async with self._rest_lock:
             if self._rest_authorization_failed:
+                self.logger.debug("BMW REST poll skipped: reauthorization required")
+                if manual_vin is not None:
+                    raise BmwCarDataApiError("BMW REST reauthorization is required")
                 return
             now = datetime.now(UTC)
             stored = self._entry.data.get(CONF_REST_REQUEST_STATE, {})
@@ -178,16 +217,40 @@ class BmwCarDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if state.get("date") != now.date().isoformat():
                 state.update(date=now.date().isoformat(), count=0, blocked=False)
             if state.get("blocked"):
+                self.logger.debug(
+                    "BMW REST poll skipped: daily quota blocked for %s, "
+                    "local calls=%s/%s; resumes on next UTC day",
+                    state["date"], state.get("count", 0), REST_DAILY_CALL_LIMIT,
+                )
+                if manual_vin is not None:
+                    raise BmwCarDataRateLimitError("REST quota is blocked until the next UTC day")
                 return
 
             due_vins = []
-            for mapping in self._build_stream_mappings():
+            mappings = self._build_stream_mappings()
+            if manual_vin is not None:
+                mappings = [mapping for mapping in mappings if mapping["vin"] == manual_vin]
+                if not mappings:
+                    raise BmwCarDataApiError("Vehicle has not been discovered")
+                self.logger.debug("BMW manual REST refresh requested for %s", manual_vin)
+            if not mappings:
+                self.logger.debug("BMW REST poll skipped: waiting for MQTT vehicle discovery")
+                return
+            for mapping in mappings:
                 vin = mapping["vin"]
                 previous = state["last_attempt_by_vin"].get(vin)
-                if previous:
+                if previous and manual_vin is None:
                     try:
                         last_attempt = datetime.fromisoformat(previous)
                         if now - last_attempt < timedelta(hours=REST_UPDATE_HOURS):
+                            self.logger.debug(
+                                "BMW REST vehicle %s in cooldown: eligible at %s, "
+                                "saved fields=%s, available=%s",
+                                vin,
+                                (last_attempt + timedelta(hours=REST_UPDATE_HOURS)).isoformat(),
+                                len(self._rest_data_by_vin.get(vin, {})),
+                                self._rest_available_by_vin.get(vin, False),
+                            )
                             continue
                     except (ValueError, TypeError):
                         self.logger.error("Invalid persisted BMW REST polling timestamp")
@@ -196,6 +259,7 @@ class BmwCarDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         continue
                 due_vins.append(vin)
             if not due_vins:
+                self.logger.debug("BMW REST poll skipped: no vehicles due for a snapshot")
                 return
 
             try:
@@ -208,6 +272,8 @@ class BmwCarDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if not self._handle_rest_error(err, state):
                     self.logger.warning("BMW REST container setup unavailable: %s", err)
                 self._publish_rest_snapshot()
+                if manual_vin is not None:
+                    raise
                 return
 
             for vin in due_vins:
@@ -221,7 +287,11 @@ class BmwCarDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     )
                 except (BmwCarDataApiError, BmwCarDataOAuthError, ValueError) as err:
                     self._rest_available_by_vin[vin] = False
-                    if self._handle_rest_error(err, state):
+                    stop_polling = self._handle_rest_error(err, state)
+                    if manual_vin is not None:
+                        self._publish_rest_snapshot()
+                        raise
+                    if stop_polling:
                         break
                     self.logger.warning("BMW REST snapshot unavailable: %s", err)
                 else:
@@ -232,6 +302,10 @@ class BmwCarDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         key: telematic[key] for key in REST_SENSOR_KEYS if key in telematic
                     }
                     self._rest_available_by_vin[vin] = True
+                    self.logger.debug(
+                        "BMW REST snapshot received for %s: selected fields=%s/%s",
+                        vin, len(self._rest_data_by_vin[vin]), len(REST_SENSOR_KEYS),
+                    )
             self._publish_rest_snapshot()
 
     def _publish_rest_snapshot(self) -> None:
@@ -326,6 +400,10 @@ class BmwCarDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             raise BmwCarDataRateLimitError("Local BMW REST daily call limit reached")
         state["count"] += 1
         self._save_rest_state(state)
+        self.logger.debug(
+            "BMW REST request starting: local calls=%s/%s for %s",
+            state["count"], REST_DAILY_CALL_LIMIT, state["date"],
+        )
         return await request()
 
     def _handle_rest_error(

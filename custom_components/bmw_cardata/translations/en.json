@@ -46,7 +46,17 @@
       }
     }
   },
+  "exceptions": {
+    "rest_refresh_failed": {
+      "message": "BMW REST refresh failed: {reason}"
+    }
+  },
   "entity": {
+    "button": {
+      "refresh_rest": {
+        "name": "Refresh REST data"
+      }
+    },
     "binary_sensor": {
       "doors_closed": {
         "name": "Car Locked"
