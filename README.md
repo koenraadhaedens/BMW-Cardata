@@ -38,6 +38,56 @@ Home Assistant 2024.6.0 or newer is required.
 4. Install **BMW CarData**.
 5. Restart Home Assistant.
 
+## Prerequisites
+
+Before setting up the integration:
+
+1. Follow the technical registration steps in the
+   [CarData Customer Portal](https://bmw-cardata.bmwgroup.com/customer/public/api-documentation/Id-Technical-registration)
+   to generate your **Client ID**.
+2. Subscribe that Client ID to **CarData streaming** (`cardata:streaming:read`).
+   Also subscribe to **CarData API** (`cardata:api:read`) if you want the REST battery
+   and charging sensors, which are enabled by default in this integration.
+3. In BMW's customer portal, click **Configure data stream**. This button becomes
+   active after the streaming subscription succeeds. Subscribing alone is not
+   enough: you must also configure the stream and select the attributes to receive.
+4. Select the items below that BMW offers for your vehicle, save the selection,
+   and check that the stream configuration status is **ready**. Configure each
+   vehicle you want to use. To edit an existing stream, click **Change data selection**.
+5. Continue with Home Assistant setup below. The integration obtains connection
+   details from authorization and uses BMW's default host/port; you do not need to
+   copy the portal's MQTT credentials or enter an individual vehicle topic.
+
+### Items to enable in the BMW data stream
+
+BMW's labels and available attributes vary by vehicle. Use these technical
+descriptors where shown; unavailable items cannot be enabled.
+
+| Item to enable | Technical descriptor / selection guidance |
+| --- | --- |
+| Mileage / odometer | `vehicle.vehicle.travelledDistance` |
+| Fuel level | `vehicle.drivetrain.fuelSystem.level` |
+| Remaining fuel | `vehicle.drivetrain.fuelSystem.remainingFuel` |
+| Combined electric + fuel remaining range | `vehicle.drivetrain.lastRemainingRange` |
+| Electric remaining range | `vehicle.drivetrain.electricEngine.kombiRemainingElectricRange` |
+| Maximum battery energy | `vehicle.drivetrain.batteryManagement.maxEnergy` |
+| Charging activity | `vehicle.drivetrain.electricEngine.charging.status` (used by the MQTT Charging Active binary sensor, even with REST enabled) |
+| Vehicle lock status | `vehicle.cabin.door.lock.status` |
+| Door status | `vehicle.cabin.door.status` |
+| Sunroof status | `vehicle.cabin.sunroof.status` |
+| Sunroof tilt status | `vehicle.cabin.sunroof.tiltStatus` |
+| Sunroof overall status | `vehicle.cabin.sunroof.overallStatus` |
+| Current location (optional, for GPS tracker and coordinate sensors) | Enable both current-location latitude and longitude |
+
+For MQTT-only operation, also select the battery state-of-charge and charging
+status attributes offered for your vehicle. With REST enabled, Battery Level,
+Charging Status and Charging Method are fetched through the automatically selected
+or created REST container; stream selection does not control those REST readings.
+
+The wildcard MQTT topic `#` receives the vehicles and attributes already enabled
+in BMW's portal; it does not enable additional data there. Sensors remain unknown
+until BMW publishes their selected attributes, commonly after activity on the car.
+
 ## Setup in Home Assistant
 
 1. Go to **Settings → Devices & Services → Add Integration**.
