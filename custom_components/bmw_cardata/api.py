@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass
+from datetime import datetime
 import hashlib
 import secrets
 from typing import Any
@@ -19,6 +20,7 @@ from .const import (
     PKCE_CHALLENGE_METHOD,
     REFRESH_TOKEN_GRANT_TYPE,
     REST_BASE_URL,
+    REST_SENSOR_KEYS,
     TOKEN_PATH,
 )
 
@@ -40,28 +42,104 @@ class BmwCarDataRateLimitError(BmwCarDataApiError):
 
 
 class BmwCarDataRestApi:
-    """Read vehicle snapshots without creating or changing containers."""
+    """Read vehicle snapshots and manage the integration's data container."""
 
     def __init__(self, session: ClientSession) -> None:
         self._session = session
+
+    async def async_list_containers(
+        self, *, access_token: str
+    ) -> list[dict[str, Any]]:
+        """List active containers with validated creation timestamps."""
+        data = await self._async_request("GET", "/customers/containers", access_token)
+        containers = data.get("containers")
+        if not isinstance(containers, list):
+            raise BmwCarDataApiError("BMW REST returned an invalid container list")
+        active = []
+        for container in containers:
+            if not isinstance(container, dict):
+                raise BmwCarDataApiError("BMW REST returned invalid container metadata")
+            if container.get("state") not in ("ACTIVE", "INACTIVE", "DELETED"):
+                raise BmwCarDataApiError("BMW REST returned an invalid container state")
+            if container["state"] != "ACTIVE":
+                continue
+            self._container_id(container)
+            try:
+                created = datetime.fromisoformat(container["created"].replace("Z", "+00:00"))
+                if created.tzinfo is None:
+                    raise ValueError("Container timestamp has no timezone")
+            except (KeyError, AttributeError, TypeError, ValueError) as err:
+                raise BmwCarDataApiError("BMW REST returned an invalid container timestamp") from err
+            active.append(container)
+        return active
+
+    async def async_get_container_descriptors(
+        self, *, access_token: str, container_id: str
+    ) -> list[str]:
+        """Read the fields configured in a container."""
+        data = await self._async_request(
+            "GET", f"/customers/containers/{quote(container_id, safe='')}", access_token
+        )
+        descriptors = data.get("technicalDescriptors")
+        if not isinstance(descriptors, list) or any(
+            not isinstance(descriptor, str) for descriptor in descriptors
+        ):
+            raise BmwCarDataApiError("BMW REST returned invalid container descriptors")
+        return descriptors
+
+    async def async_create_container(self, *, access_token: str) -> str:
+        """Create a container containing only the three REST sensor fields."""
+        data = await self._async_request(
+            "POST",
+            "/customers/containers",
+            access_token,
+            payload={
+                "name": "Home Assistant BMW CarData",
+                "purpose": "Battery level, charging status and charging method sensors",
+                "technicalDescriptors": list(REST_SENSOR_KEYS),
+            },
+        )
+        return self._container_id(data)
+
+    @staticmethod
+    def _container_id(data: dict[str, Any]) -> str:
+        container_id = data.get("containerId")
+        if not isinstance(container_id, str) or not container_id.strip():
+            raise BmwCarDataApiError("BMW REST returned an invalid container ID")
+        return container_id
 
     async def async_get_telematic_data(
         self, *, access_token: str, vin: str, container_id: str
     ) -> dict[str, dict[str, Any]]:
         """Read the latest stored telematics for a vehicle and container."""
-        url = (
-            f"{REST_BASE_URL}/customers/vehicles/{quote(vin, safe='')}/telematicData?"
+        path = (
+            f"/customers/vehicles/{quote(vin, safe='')}/telematicData?"
             f"{urlencode({'containerId': container_id})}"
         )
+        data = await self._async_request("GET", path, access_token)
+        telematic = data.get("telematicData")
+        if not isinstance(telematic, dict) or any(
+            not isinstance(key, str) or not isinstance(value, dict)
+            for key, value in telematic.items()
+        ):
+            raise BmwCarDataApiError("BMW REST returned invalid telematic data")
+        return telematic
+
+    async def _async_request(
+        self, method: str, path: str, access_token: str,
+        *, payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Apply common authentication, timeouts and errors to REST requests."""
         try:
-            async with self._session.get(
-                url,
+            async with self._session.request(
+                method, f"{REST_BASE_URL}{path}",
                 headers={
                     "Authorization": f"Bearer {access_token}",
                     "x-version": "v1",
                     "Accept": "application/json",
                 },
                 timeout=ClientTimeout(total=30),
+                json=payload,
             ) as response:
                 if response.status in (401, 403):
                     raise BmwCarDataRestAuthError(
@@ -77,13 +155,9 @@ class BmwCarDataRestApi:
         except (ClientError, TimeoutError, ValueError) as err:
             raise BmwCarDataApiError("BMW REST request or JSON decoding failed") from err
 
-        telematic = data.get("telematicData") if isinstance(data, dict) else None
-        if not isinstance(telematic, dict) or any(
-            not isinstance(key, str) or not isinstance(value, dict)
-            for key, value in telematic.items()
-        ):
-            raise BmwCarDataApiError("BMW REST returned invalid telematic data")
-        return telematic
+        if not isinstance(data, dict):
+            raise BmwCarDataApiError("BMW REST returned a non-object JSON response")
+        return data
 
 
 class BmwCarDataOAuthError(BmwCarDataAuthError):

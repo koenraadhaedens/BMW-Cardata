@@ -3,11 +3,10 @@
     "step": {
       "user": {
         "title": "BMW CarData",
-        "description": "Enter your BMW CarData Client ID and MQTT stream topic from My BMW > CarData. Optionally enter an existing REST container ID to read battery level, charging status and charging method every two hours. Subscribe your client to cardata:api:read before enabling REST.",
+        "description": "Enter your BMW CarData Client ID. MQTT automatically subscribes to all your vehicles using #. REST sensors use the newest compatible active container, or create one if needed. Subscribe your client to cardata:api:read before enabling REST.",
         "data": {
           "client_id": "Client ID",
-          "stream_topic": "Stream topic",
-          "rest_container_id": "REST container ID (optional)"
+          "use_rest": "Enable REST battery and charging sensors"
         }
       },
       "authorize": {
@@ -38,10 +37,10 @@
     "step": {
       "init": {
         "title": "BMW CarData Options",
-        "description": "Configure MQTT and optional REST sensors. A REST container ID switches battery level, charging status and charging method to REST, with one request per vehicle every two hours. Leave it empty to use MQTT only.",
+        "description": "REST reads battery level, charging status and charging method every two hours. Container selection and creation are automatic. MQTT defaults to # for all vehicles; optionally enter a narrower topic. Disable REST for MQTT-only operation.",
         "data": {
-          "stream_topic": "Stream topic",
-          "rest_container_id": "REST container ID (optional)",
+          "stream_topic": "Stream topic (optional; defaults to #)",
+          "use_rest": "Enable REST battery and charging sensors",
           "verbose_logging": "Verbose logging (writes bmw_cardata.log to /config)"
         }
       }

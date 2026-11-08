@@ -16,6 +16,7 @@ REST_BASE_URL = "https://api-cardata.bmwgroup.com"
 REST_UPDATE_HOURS = 2
 REST_DAILY_CALL_LIMIT = 50
 CONF_REST_CONTAINER_ID = "rest_container_id"
+CONF_USE_REST = "use_rest"
 CONF_REST_DATA_BY_VIN = "rest_data_by_vin"
 CONF_REST_AVAILABLE_BY_VIN = "rest_available_by_vin"
 CONF_REST_REQUEST_STATE = "rest_request_state"
@@ -44,6 +45,7 @@ CONF_STREAM_TOPIC = "stream_topic"
 
 DEFAULT_STREAM_HOST = "customer.streaming-cardata.bmwgroup.com"
 DEFAULT_STREAM_PORT = 9000
+DEFAULT_STREAM_TOPIC = "#"
 DEFAULT_VERBOSE_LOGGING = False
 
 CONF_VERBOSE_LOGGING = "verbose_logging"

@@ -22,6 +22,7 @@ from .const import (
     CONF_STREAM_TOPIC,
     DEFAULT_STREAM_HOST,
     DEFAULT_STREAM_PORT,
+    DEFAULT_STREAM_TOPIC,
     STREAMING_SCOPE,
 )
 from .token_manager import BmwCarDataTokenManager
@@ -52,9 +53,17 @@ class BmwCarDataStreamManager:
     def _config_value(self, key: str) -> Any:
         """Get configuration value from options with fallback to entry data."""
         if key in self._entry.options:
-            return self._entry.options.get(key)
+            value = self._entry.options.get(key)
+            if key == CONF_STREAM_TOPIC and isinstance(value, str):
+                return value.strip() or DEFAULT_STREAM_TOPIC
+            return value
         if key in self._entry.data:
-            return self._entry.data.get(key)
+            value = self._entry.data.get(key)
+            if key == CONF_STREAM_TOPIC and isinstance(value, str):
+                return value.strip() or DEFAULT_STREAM_TOPIC
+            return value
+        if key == CONF_STREAM_TOPIC:
+            return DEFAULT_STREAM_TOPIC
         if key == CONF_STREAM_HOST:
             return DEFAULT_STREAM_HOST
         if key == CONF_STREAM_PORT:

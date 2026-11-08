@@ -12,9 +12,13 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import BmwCarDataAuthApi, BmwCarDataRestApi
 from .const import (
+    CONF_REST_CONTAINER_ID,
+    CONF_STREAM_TOPIC,
+    CONF_USE_REST,
     CONF_VERBOSE_LOGGING,
     DATA_ENTRIES,
     DEFAULT_VERBOSE_LOGGING,
+    DEFAULT_STREAM_TOPIC,
     DOMAIN,
     PLATFORMS,
 )
@@ -24,6 +28,26 @@ from .token_manager import BmwCarDataTokenManager
 
 _INTEGRATION_LOGGER_NAME = "custom_components.bmw_cardata"
 _FILE_HANDLER_MARKER = "_bmw_cardata_verbose_handler"
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Replace legacy manual container settings without changing entity IDs."""
+    if entry.version > 2:
+        logging.getLogger(__name__).error("Cannot downgrade a newer BMW CarData entry")
+        return False
+    if entry.version == 1:
+        data = dict(entry.data)
+        options = dict(entry.options)
+        legacy_id = options.get(CONF_REST_CONTAINER_ID, data.get(CONF_REST_CONTAINER_ID, ""))
+        data[CONF_USE_REST] = bool(legacy_id)
+        data[CONF_STREAM_TOPIC] = data.get(CONF_STREAM_TOPIC) or DEFAULT_STREAM_TOPIC
+        data.pop(CONF_REST_CONTAINER_ID, None)
+        options.pop(CONF_REST_CONTAINER_ID, None)
+        options[CONF_USE_REST] = data[CONF_USE_REST]
+        if CONF_STREAM_TOPIC in options:
+            options[CONF_STREAM_TOPIC] = options[CONF_STREAM_TOPIC] or DEFAULT_STREAM_TOPIC
+        hass.config_entries.async_update_entry(entry, data=data, options=options, version=2)
+    return True
 
 
 def _apply_verbose_logging(config_dir: str) -> None:

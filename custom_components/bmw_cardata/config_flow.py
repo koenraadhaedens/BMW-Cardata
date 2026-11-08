@@ -19,13 +19,14 @@ from .const import (
     CONF_GCID,
     CONF_ID_TOKEN,
     CONF_REFRESH_TOKEN,
-    CONF_REST_CONTAINER_ID,
+    CONF_USE_REST,
     CONF_SCOPE,
     CONF_STREAM_TOPIC,
     CONF_TOKEN_EXPIRES_AT,
     CONF_VERBOSE_LOGGING,
     DEFAULT_VERBOSE_LOGGING,
     DEFAULT_SCOPE,
+    DEFAULT_STREAM_TOPIC,
     DOMAIN,
     ERROR_ACCESS_DENIED,
     ERROR_AUTHORIZATION_PENDING,
@@ -41,8 +42,7 @@ _LOGGER = logging.getLogger(__name__)
 STEP_USER_DATA_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_CLIENT_ID): str,
-        vol.Required(CONF_STREAM_TOPIC): str,
-        vol.Optional(CONF_REST_CONTAINER_ID, default=""): str,
+        vol.Optional(CONF_USE_REST, default=True): bool,
     }
 )
 
@@ -52,7 +52,7 @@ STEP_AUTHORIZE_DATA_SCHEMA = vol.Schema({})
 class BmwCarDataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for BMW CarData."""
 
-    VERSION = 1
+    VERSION = 2
 
     _client_id: str | None = None
     _device_code: str | None = None
@@ -74,8 +74,8 @@ class BmwCarDataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return await self.async_step_user(
             {
                 CONF_CLIENT_ID: entry_data[CONF_CLIENT_ID],
-                CONF_STREAM_TOPIC: current.get(CONF_STREAM_TOPIC, ""),
-                CONF_REST_CONTAINER_ID: current.get(CONF_REST_CONTAINER_ID, ""),
+                CONF_STREAM_TOPIC: current.get(CONF_STREAM_TOPIC, DEFAULT_STREAM_TOPIC),
+                CONF_USE_REST: current.get(CONF_USE_REST, False),
             }
         )
 
@@ -85,22 +85,13 @@ class BmwCarDataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             client_id = user_input[CONF_CLIENT_ID].strip()
-            stream_topic = str(user_input.get(CONF_STREAM_TOPIC, "")).strip()
-            if not stream_topic:
-                errors[CONF_STREAM_TOPIC] = "required"
-
-            if errors:
-                return self.async_show_form(
-                    step_id="user",
-                    data_schema=STEP_USER_DATA_SCHEMA,
-                    errors=errors,
-                )
+            stream_topic = str(
+                user_input.get(CONF_STREAM_TOPIC, DEFAULT_STREAM_TOPIC)
+            ).strip() or DEFAULT_STREAM_TOPIC
 
             self._stream_options = {
                 CONF_STREAM_TOPIC: stream_topic,
-                CONF_REST_CONTAINER_ID: str(
-                    user_input.get(CONF_REST_CONTAINER_ID, "")
-                ).strip(),
+                CONF_USE_REST: bool(user_input.get(CONF_USE_REST, True)),
             }
             api = BmwCarDataAuthApi(async_get_clientsession(self.hass))
             pkce = api.generate_pkce_pair()
@@ -110,7 +101,7 @@ class BmwCarDataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     client_id=client_id,
                     scope=(
                         f"{DEFAULT_SCOPE} {REST_SCOPE}"
-                        if self._stream_options[CONF_REST_CONTAINER_ID]
+                        if self._stream_options[CONF_USE_REST]
                         else DEFAULT_SCOPE
                     ),
                     code_challenge=pkce.code_challenge,
@@ -158,7 +149,7 @@ class BmwCarDataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             else:
                 if (
                     self._stream_options
-                    and self._stream_options.get(CONF_REST_CONTAINER_ID)
+                    and self._stream_options.get(CONF_USE_REST)
                     and REST_SCOPE not in (token_response.scope or "").split()
                 ):
                     errors["base"] = "rest_scope_missing"
@@ -246,24 +237,22 @@ class BmwCarDataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class BmwCarDataOptionsFlow(config_entries.OptionsFlow):
-    """BMW CarData options flow (placeholder for future options)."""
+    """Manage optional REST access and advanced MQTT settings."""
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None):
         """Manage options."""
         errors: dict[str, str] = {}
         if user_input is not None:
-            stream_topic = str(user_input.get(CONF_STREAM_TOPIC, "")).strip()
-            if not stream_topic:
-                errors[CONF_STREAM_TOPIC] = "required"
+            stream_topic = str(
+                user_input.get(CONF_STREAM_TOPIC, DEFAULT_STREAM_TOPIC)
+            ).strip() or DEFAULT_STREAM_TOPIC
 
             if not errors:
                 return self.async_create_entry(
                     title="",
                     data={
                         CONF_STREAM_TOPIC: stream_topic,
-                        CONF_REST_CONTAINER_ID: str(
-                            user_input.get(CONF_REST_CONTAINER_ID, "")
-                        ).strip(),
+                        CONF_USE_REST: bool(user_input.get(CONF_USE_REST, False)),
                         CONF_VERBOSE_LOGGING: bool(user_input.get(CONF_VERBOSE_LOGGING, DEFAULT_VERBOSE_LOGGING)),
                     },
                 )
@@ -271,14 +260,14 @@ class BmwCarDataOptionsFlow(config_entries.OptionsFlow):
         current_options = {**self.config_entry.data, **self.config_entry.options}
         schema = vol.Schema(
             {
-                vol.Required(
+                vol.Optional(
                     CONF_STREAM_TOPIC,
-                    default=current_options.get(CONF_STREAM_TOPIC, ""),
+                    default=current_options.get(CONF_STREAM_TOPIC) or DEFAULT_STREAM_TOPIC,
                 ): str,
                 vol.Optional(
-                    CONF_REST_CONTAINER_ID,
-                    default=current_options.get(CONF_REST_CONTAINER_ID, ""),
-                ): str,
+                    CONF_USE_REST,
+                    default=current_options.get(CONF_USE_REST, False),
+                ): bool,
                 vol.Optional(
                     CONF_VERBOSE_LOGGING,
                     default=current_options.get(CONF_VERBOSE_LOGGING, DEFAULT_VERBOSE_LOGGING),

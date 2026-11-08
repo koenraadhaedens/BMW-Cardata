@@ -63,6 +63,9 @@ class ConfigFlow:
     def async_abort(self, **kwargs):
         return kwargs
 
+    def async_create_entry(self, **kwargs):
+        return kwargs
+
     def async_update_reload_and_abort(self, entry, **kwargs):
         return {"entry": entry, **kwargs}
 
@@ -77,7 +80,7 @@ def load_modules():
     """Load real integration code without starting a Home Assistant instance."""
     interfaces = {
         "homeassistant.config_entries": {
-            "ConfigEntry": object, "ConfigFlow": ConfigFlow, "OptionsFlow": object,
+            "ConfigEntry": object, "ConfigFlow": ConfigFlow, "OptionsFlow": ConfigFlow,
         },
         "homeassistant.core": {"HomeAssistant": object, "callback": lambda fn: fn},
         "homeassistant.const": {
@@ -151,7 +154,8 @@ class RestTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.clock.stop)
         self.entry = SimpleNamespace(
             entry_id="test",
-            options={C.CONF_REST_CONTAINER_ID: "test-container"},
+            version=2,
+            options={C.CONF_USE_REST: True},
             data={
                 C.CONF_SCOPE: f"{C.STREAMING_SCOPE} {C.REST_SCOPE}",
                 C.CONF_STREAM_TOPIC: f"vehicles/{VIN}",
@@ -172,6 +176,12 @@ class RestTests(unittest.IsolatedAsyncioTestCase):
             async_get_telematic_snapshot=AsyncMock(return_value={}),
         )
         self.api = SimpleNamespace(
+            async_list_containers=AsyncMock(return_value=[{
+                "containerId": "test-container", "state": "ACTIVE",
+                "created": "2025-12-01T00:00:00Z",
+            }]),
+            async_get_container_descriptors=AsyncMock(return_value=list(C.REST_SENSOR_KEYS)),
+            async_create_container=AsyncMock(return_value="created-container"),
             async_get_telematic_data=AsyncMock(return_value={
                 C.REST_BATTERY_LEVEL: {"value": "97", "timestamp": "stored-time"},
                 C.REST_CHARGING_STATUS: {"value": "NOCHARGING"},
@@ -182,8 +192,9 @@ class RestTests(unittest.IsolatedAsyncioTestCase):
         self.tokens = SimpleNamespace(async_get_access_token=AsyncMock(return_value="test"))
         self.coordinator = self.make_coordinator()
 
-    def update_entry(self, entry, *, data):
-        entry.data = data
+    def update_entry(self, entry, **kwargs):
+        for key, value in kwargs.items():
+            setattr(entry, key, value)
 
     def make_coordinator(self):
         return MODULES.coordinator.BmwCarDataCoordinator(
@@ -206,7 +217,9 @@ class RestTests(unittest.IsolatedAsyncioTestCase):
                 self.coordinator.async_refresh_rest(),
             )
         self.assertEqual(self.api.async_get_telematic_data.await_count, 12)
-        self.assertEqual(self.entry.data[C.CONF_REST_REQUEST_STATE]["count"], 12)
+        self.assertEqual(self.entry.data[C.CONF_REST_REQUEST_STATE]["count"], 14)
+        self.api.async_list_containers.assert_awaited_once()
+        self.api.async_get_container_descriptors.assert_awaited_once()
 
     async def test_only_selected_sensors_use_rest_and_mqtt_does_not_overwrite_them(self):
         await self.coordinator.async_refresh_rest()
@@ -247,7 +260,7 @@ class RestTests(unittest.IsolatedAsyncioTestCase):
         self.api.async_get_telematic_data.side_effect = MODULES.api.BmwCarDataApiError("offline")
         await self.coordinator.async_refresh_rest()
         await self.coordinator.async_refresh_rest()
-        self.assertEqual(self.entry.data[C.CONF_REST_REQUEST_STATE]["count"], 1)
+        self.assertEqual(self.entry.data[C.CONF_REST_REQUEST_STATE]["count"], 3)
         self.assertEqual(self.api.async_get_telematic_data.await_count, 1)
         self.assertFalse(self.sensor("charging_status").available)
         self.assertTrue(self.sensor("battery_max_energy").available)
@@ -271,12 +284,172 @@ class RestTests(unittest.IsolatedAsyncioTestCase):
         for hour in range(24):
             Clock.current = datetime(2026, 1, 1, hour, tzinfo=UTC)
             await self.coordinator.async_refresh_rest()
-        self.assertEqual(self.api.async_get_telematic_data.await_count, 50)
+        self.assertEqual(self.api.async_get_telematic_data.await_count, 48)
         self.assertEqual(self.entry.data[C.CONF_REST_REQUEST_STATE]["count"], 50)
         Clock.current = datetime(2026, 1, 2, tzinfo=UTC)
         await self.coordinator.async_refresh_rest()
-        self.assertEqual(self.api.async_get_telematic_data.await_count, 55)
-        self.assertEqual(self.entry.data[C.CONF_REST_REQUEST_STATE]["count"], 5)
+        self.assertEqual(self.api.async_get_telematic_data.await_count, 53)
+        self.assertEqual(self.entry.data[C.CONF_REST_REQUEST_STATE]["count"], 7)
+
+    async def test_newest_compatible_container_wins_without_creation(self):
+        self.api.async_list_containers.return_value = [
+            {"containerId": "old", "created": "2025-10-01T00:00:00Z"},
+            {"containerId": "unrelated", "created": "2025-12-01T00:00:00Z"},
+            {"containerId": "compatible", "created": "2025-11-01T00:00:00Z"},
+        ]
+        self.api.async_get_container_descriptors.side_effect = (
+            lambda *, access_token, container_id:
+            [] if container_id == "unrelated" else list(C.REST_SENSOR_KEYS)
+        )
+        await self.coordinator.async_refresh_rest()
+        self.assertEqual(
+            [call.kwargs["container_id"] for call in self.api.async_get_container_descriptors.call_args_list],
+            ["unrelated", "compatible"],
+        )
+        self.assertEqual(
+            self.api.async_get_telematic_data.call_args.kwargs["container_id"], "compatible"
+        )
+        self.api.async_create_container.assert_not_awaited()
+        self.assertEqual(self.entry.data[C.CONF_REST_REQUEST_STATE]["count"], 4)
+
+    async def test_empty_or_incompatible_containers_create_once_and_cache_across_reload(self):
+        for empty in (True, False):
+            with self.subTest(empty=empty):
+                self.entry.data.pop(C.CONF_REST_REQUEST_STATE, None)
+                self.coordinator = self.make_coordinator()
+                self.api.async_list_containers.reset_mock()
+                self.api.async_create_container.reset_mock()
+                self.api.async_list_containers.return_value = (
+                    [] if empty else [{"containerId": "unrelated", "created": "2025-12-01T00:00:00Z"}]
+                )
+                self.api.async_get_container_descriptors.return_value = []
+                await self.coordinator.async_refresh_rest()
+                self.assertEqual(
+                    self.api.async_get_telematic_data.call_args.kwargs["container_id"],
+                    "created-container",
+                )
+                Clock.current += timedelta(hours=2)
+                self.coordinator = self.make_coordinator()
+                await self.coordinator.async_refresh_rest()
+                self.api.async_list_containers.assert_awaited_once()
+                self.api.async_create_container.assert_awaited_once()
+
+    async def test_container_selection_refreshes_on_new_utc_day(self):
+        await self.coordinator.async_refresh_rest()
+        self.api.async_list_containers.return_value = [
+            {"containerId": "newest", "created": "2025-12-02T00:00:00Z"}
+        ]
+        Clock.current = datetime(2026, 1, 2, tzinfo=UTC)
+        await self.coordinator.async_refresh_rest()
+        self.assertEqual(self.api.async_list_containers.await_count, 2)
+        self.assertEqual(
+            self.api.async_get_telematic_data.call_args.kwargs["container_id"], "newest"
+        )
+
+    async def test_failed_discovery_never_creates_blindly_and_retries_after_two_hours(self):
+        self.api.async_list_containers.side_effect = MODULES.api.BmwCarDataApiError("offline")
+        await self.coordinator.async_refresh_rest()
+        self.coordinator = self.make_coordinator()
+        await self.coordinator.async_refresh_rest()
+        self.api.async_list_containers.assert_awaited_once()
+        self.api.async_create_container.assert_not_awaited()
+        self.api.async_get_telematic_data.assert_not_awaited()
+        self.assertEqual(self.entry.data[C.CONF_REST_REQUEST_STATE]["count"], 1)
+        Clock.current += timedelta(hours=2)
+        self.api.async_list_containers.side_effect = None
+        await self.coordinator.async_refresh_rest()
+        self.assertEqual(self.api.async_list_containers.await_count, 2)
+        self.assertTrue(self.sensor("battery_soc").available)
+
+    async def test_discovery_cannot_exceed_budget_or_create_after_a_rate_limit(self):
+        self.entry.data[C.CONF_REST_REQUEST_STATE] = {
+            "date": "2026-01-01", "count": 49, "last_attempt_by_vin": {},
+        }
+        self.api.async_list_containers.return_value = []
+        await self.coordinator.async_refresh_rest()
+        self.api.async_list_containers.assert_awaited_once()
+        self.api.async_create_container.assert_not_awaited()
+        self.api.async_get_telematic_data.assert_not_awaited()
+        self.assertEqual(self.entry.data[C.CONF_REST_REQUEST_STATE]["count"], 50)
+        self.assertTrue(self.entry.data[C.CONF_REST_REQUEST_STATE]["blocked"])
+
+    async def test_ambiguous_creation_failure_rediscovers_before_creating_again(self):
+        self.api.async_list_containers.return_value = []
+        self.api.async_create_container.side_effect = MODULES.api.BmwCarDataApiError("timeout")
+        await self.coordinator.async_refresh_rest()
+        self.coordinator = self.make_coordinator()
+        await self.coordinator.async_refresh_rest()
+        self.api.async_create_container.assert_awaited_once()
+        self.api.async_list_containers.assert_awaited_once()
+        self.assertEqual(self.entry.data[C.CONF_REST_REQUEST_STATE]["count"], 2)
+        Clock.current += timedelta(hours=2)
+        self.api.async_list_containers.return_value = [
+            {"containerId": "created-despite-timeout", "created": "2025-12-01T00:00:00Z"}
+        ]
+        await self.coordinator.async_refresh_rest()
+        self.api.async_create_container.assert_awaited_once()
+        self.assertEqual(
+            self.api.async_get_telematic_data.call_args.kwargs["container_id"],
+            "created-despite-timeout",
+        )
+
+    async def test_full_incompatible_account_does_not_create_or_repeat_checks_same_day(self):
+        self.api.async_list_containers.return_value = [
+            {"containerId": str(i), "created": "2025-12-01T00:00:00Z"}
+            for i in range(10)
+        ]
+        self.api.async_get_container_descriptors.return_value = []
+        await self.coordinator.async_refresh_rest()
+        Clock.current += timedelta(hours=2)
+        self.coordinator = self.make_coordinator()
+        await self.coordinator.async_refresh_rest()
+        self.api.async_list_containers.assert_awaited_once()
+        self.assertEqual(self.api.async_get_container_descriptors.await_count, 10)
+        self.api.async_create_container.assert_not_awaited()
+        self.api.async_get_telematic_data.assert_not_awaited()
+        self.assertEqual(self.entry.data[C.CONF_REST_REQUEST_STATE]["count"], 11)
+
+    async def test_wildcard_default_maps_two_vehicles_from_mqtt(self):
+        self.entry.data.pop(C.CONF_STREAM_TOPIC)
+        self.entry.data[C.CONF_GCID] = "account"
+        manager = MODULES.stream_manager.BmwCarDataStreamManager(
+            self.hass, entry=self.entry, token_manager=self.tokens,
+        )
+        self.assertTrue(manager.enabled)
+        topic = manager._config_value(C.CONF_STREAM_TOPIC)
+        self.assertEqual(manager._build_subscription_topic("account", topic), "account/#")
+        second_vin = "WBA00000000000002"
+        updates = {}
+        for vin in (VIN, second_vin):
+            updates.update(manager._extract_telematic_updates(
+                f"account/{vin}", {"name": "soc", "value": "40"}
+            ))
+        self.stream.async_get_telematic_snapshot.return_value = updates
+        tasks = []
+        self.hass.async_create_task = lambda coro: tasks.append(asyncio.create_task(coro))
+        await self.coordinator.async_apply_stream_snapshot()
+        await asyncio.gather(*tasks)
+        self.assertEqual(len(self.coordinator.data[C.CONF_MAPPINGS]), 2)
+        self.assertEqual(self.api.async_get_telematic_data.await_count, 2)
+        self.api.async_list_containers.assert_awaited_once()
+
+    async def test_legacy_migration_preserves_rest_choice_topic_and_quota(self):
+        for legacy_id, expected in (("legacy-container", True), ("", False)):
+            with self.subTest(legacy_id=legacy_id):
+                self.entry.version = 1
+                self.entry.options = {
+                    C.CONF_REST_CONTAINER_ID: legacy_id, C.CONF_STREAM_TOPIC: "#",
+                }
+                quota = {"date": "2026-01-01", "count": 20, "last_attempt_by_vin": {}}
+                self.entry.data[C.CONF_REST_REQUEST_STATE] = quota
+                self.entry.data[C.CONF_REST_CONTAINER_ID] = "stored-container"
+                self.assertTrue(await MODULES.integration.async_migrate_entry(self.hass, self.entry))
+                self.assertEqual(self.entry.version, 2)
+                self.assertEqual(self.entry.options[C.CONF_USE_REST], expected)
+                self.assertEqual(self.entry.options[C.CONF_STREAM_TOPIC], "#")
+                self.assertEqual(self.entry.data[C.CONF_REST_REQUEST_STATE], quota)
+                self.assertNotIn(C.CONF_REST_CONTAINER_ID, self.entry.data)
+                self.assertNotIn(C.CONF_REST_CONTAINER_ID, self.entry.options)
 
     async def test_authorization_failure_recovers_after_reauth_without_daily_block(self):
         self.api.async_get_telematic_data.side_effect = MODULES.api.BmwCarDataRestAuthError("denied")
@@ -304,7 +477,7 @@ class RestTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.sensor("battery_soc").native_value, 97)
 
     async def test_rest_disabled_keeps_existing_mqtt_behavior(self):
-        self.entry.options[C.CONF_REST_CONTAINER_ID] = ""
+        self.entry.options[C.CONF_USE_REST] = False
         self.stream.async_get_telematic_snapshot.return_value = {
             VIN: {"soc": {"value": "42"}, C.REST_CHARGING_STATUS: {"value": "CHARGING"}}
         }
@@ -330,7 +503,7 @@ class RestTests(unittest.IsolatedAsyncioTestCase):
         }}}
         await MODULES.integration._async_options_updated(self.hass, self.entry)
         self.hass.config_entries.async_reload.assert_not_awaited()
-        self.entry.options = {C.CONF_REST_CONTAINER_ID: "different-container"}
+        self.entry.options = {C.CONF_USE_REST: False}
         await MODULES.integration._async_options_updated(self.hass, self.entry)
         self.hass.config_entries.async_reload.assert_awaited_once_with(self.entry.entry_id)
 
@@ -355,6 +528,69 @@ class RestTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ApiTests(unittest.IsolatedAsyncioTestCase):
+    def response_api(self, body, status=200):
+        response = SimpleNamespace(status=status, json=AsyncMock(return_value=body))
+        context = Mock(
+            __aenter__=AsyncMock(return_value=response),
+            __aexit__=AsyncMock(return_value=False),
+        )
+        session = SimpleNamespace(request=Mock(return_value=context))
+        return MODULES.api.BmwCarDataRestApi(session), session
+
+    async def test_list_ignores_inactive_containers_and_rejects_invalid_metadata(self):
+        api, _session = self.response_api({"containers": [
+            {"containerId": "active", "state": "ACTIVE", "created": "2025-12-01T00:00:00Z"},
+            {"containerId": "inactive", "state": "INACTIVE"},
+            {"containerId": "deleted", "state": "DELETED"},
+        ]})
+        self.assertEqual(
+            [item["containerId"] for item in await api.async_list_containers(access_token="test")],
+            ["active"],
+        )
+        for invalid in (
+            {"containers": {}},
+            {"containers": [{"containerId": "bad", "state": "ACTIVE", "created": "invalid"}]},
+            {"containers": [{"containerId": "", "state": "ACTIVE", "created": "2025-12-01T00:00:00Z"}]},
+        ):
+            api, _session = self.response_api(invalid)
+            with self.assertRaises(MODULES.api.BmwCarDataApiError):
+                await api.async_list_containers(access_token="test")
+
+    async def test_create_posts_only_required_fields_and_requires_returned_id(self):
+        api, session = self.response_api({"containerId": "new"}, status=201)
+        self.assertEqual(await api.async_create_container(access_token="test"), "new")
+        args, kwargs = session.request.call_args
+        self.assertEqual(args[0], "POST")
+        self.assertEqual(kwargs["json"]["technicalDescriptors"], list(C.REST_SENSOR_KEYS))
+        self.assertEqual(kwargs["headers"]["x-version"], "v1")
+        api, _session = self.response_api({}, status=201)
+        with self.assertRaises(MODULES.api.BmwCarDataApiError):
+            await api.async_create_container(access_token="test")
+
+    async def test_new_setup_needs_only_client_id_and_blank_options_topic_becomes_wildcard(self):
+        submitted = MODULES.config_flow.STEP_USER_DATA_SCHEMA({"client_id": "test"})
+        flow = MODULES.config_flow.BmwCarDataConfigFlow()
+        flow.hass = SimpleNamespace()
+        auth = Mock()
+        auth.generate_pkce_pair.return_value = SimpleNamespace(
+            code_challenge="challenge", code_verifier="verifier",
+        )
+        auth.request_device_code = AsyncMock(return_value=SimpleNamespace(
+            device_code="device", user_code="user", verification_uri="https://bmw.example",
+            expires_in=300,
+        ))
+        with patch.object(MODULES.config_flow, "BmwCarDataAuthApi", return_value=auth):
+            await flow.async_step_user(submitted)
+        self.assertEqual(flow._stream_options[C.CONF_STREAM_TOPIC], "#")
+        self.assertIn(C.REST_SCOPE, auth.request_device_code.call_args.kwargs["scope"].split())
+        self.assertNotIn(C.CONF_REST_CONTAINER_ID, flow._stream_options)
+        options = MODULES.config_flow.BmwCarDataOptionsFlow()
+        result = await options.async_step_init({
+            C.CONF_STREAM_TOPIC: "  ", C.CONF_USE_REST: True,
+        })
+        self.assertEqual(result["data"][C.CONF_STREAM_TOPIC], "#")
+        self.assertTrue(result["data"][C.CONF_USE_REST])
+
     async def test_rest_headers_and_invalid_response_and_http_errors(self):
         for status, body, expected_error in (
             (200, {"telematicData": {C.REST_BATTERY_LEVEL: {"value": "97"}}}, None),
@@ -370,7 +606,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                     __aenter__=AsyncMock(return_value=response),
                     __aexit__=AsyncMock(return_value=False),
                 )
-                session = SimpleNamespace(get=Mock(return_value=context))
+                session = SimpleNamespace(request=Mock(return_value=context))
                 api = MODULES.api.BmwCarDataRestApi(session)
                 call = api.async_get_telematic_data(
                     access_token="test-token", vin=VIN, container_id="container & test",
@@ -380,16 +616,16 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                         await call
                 else:
                     self.assertEqual(await call, body["telematicData"])
-                    args, kwargs = session.get.call_args
-                    self.assertIn("containerId=container+%26+test", args[0])
+                    args, kwargs = session.request.call_args
+                    self.assertIn("containerId=container+%26+test", args[1])
                     self.assertEqual(kwargs["headers"]["x-version"], "v1")
                     self.assertEqual(kwargs["headers"]["Authorization"], "Bearer test-token")
                 if status >= 400:
                     response.json.assert_not_awaited()
 
     async def test_setup_requests_rest_scope_only_when_enabled(self):
-        for container_id in ("", "container"):
-            with self.subTest(container_id=container_id):
+        for use_rest in (False, True):
+            with self.subTest(use_rest=use_rest):
                 flow = MODULES.config_flow.BmwCarDataConfigFlow()
                 flow.hass = SimpleNamespace()
                 auth = Mock()
@@ -403,11 +639,11 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                 with patch.object(MODULES.config_flow, "BmwCarDataAuthApi", return_value=auth):
                     await flow.async_step_user({
                         "client_id": "test", "stream_topic": VIN,
-                        C.CONF_REST_CONTAINER_ID: container_id,
+                        C.CONF_USE_REST: use_rest,
                     })
                 scopes = auth.request_device_code.call_args.kwargs["scope"].split()
                 self.assertIn(C.STREAMING_SCOPE, scopes)
-                self.assertEqual(C.REST_SCOPE in scopes, bool(container_id))
+                self.assertEqual(C.REST_SCOPE in scopes, use_rest)
 
     async def test_reauthorization_preserves_entry_and_checks_account_and_scope(self):
         for gcid, scope, expected in (
@@ -422,7 +658,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                 flow._client_id = "client"
                 flow._device_code = "device"
                 flow._code_verifier = "verifier"
-                flow._stream_options = {C.CONF_REST_CONTAINER_ID: "container"}
+                flow._stream_options = {C.CONF_USE_REST: True}
                 auth = SimpleNamespace(request_token_with_device_code=AsyncMock(
                     return_value=MODULES.api.TokenResponse(
                         access_token="new", token_type="Bearer", expires_in=3600,

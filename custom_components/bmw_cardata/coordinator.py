@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import logging
 import asyncio
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, TypeVar
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -23,12 +24,13 @@ from .const import (
     CONF_BASIC_DATA_BY_VIN,
     CONF_MAPPINGS,
     CONF_REST_AVAILABLE_BY_VIN,
-    CONF_REST_CONTAINER_ID,
     CONF_REST_DATA_BY_VIN,
     CONF_REST_REQUEST_STATE,
     CONF_SCOPE,
     CONF_STREAM_TOPIC,
     CONF_TELEMATIC_DATA_BY_VIN,
+    CONF_USE_REST,
+    DEFAULT_STREAM_TOPIC,
     REST_DAILY_CALL_LIMIT,
     REST_SCOPE,
     REST_SENSOR_KEYS,
@@ -36,6 +38,8 @@ from .const import (
 )
 from .stream_manager import BmwCarDataStreamManager
 from .token_manager import BmwCarDataTokenManager
+
+_RestResult = TypeVar("_RestResult")
 
 
 class BmwCarDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -68,16 +72,9 @@ class BmwCarDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._telematic_cache_by_vin: dict[str, dict[str, dict[str, Any]]] = {}
 
     @property
-    def rest_container_id(self) -> str:
-        """Return the configured existing REST container."""
-        return self._entry.options.get(
-            CONF_REST_CONTAINER_ID, self._entry.data.get(CONF_REST_CONTAINER_ID, "")
-        )
-
-    @property
     def use_rest(self) -> bool:
         """Return whether REST sensors are enabled."""
-        return bool(self.rest_container_id)
+        return bool(self._entry.options.get(CONF_USE_REST, self._entry.data.get(CONF_USE_REST, False)))
 
     @property
     def use_streaming(self) -> bool:
@@ -136,6 +133,8 @@ class BmwCarDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         ):
             return
         async with self._rest_lock:
+            if self._rest_authorization_failed:
+                return
             now = datetime.now(UTC)
             stored = self._entry.data.get(CONF_REST_REQUEST_STATE, {})
             state = {
@@ -147,6 +146,7 @@ class BmwCarDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if state.get("blocked"):
                 return
 
+            due_vins = []
             for mapping in self._build_stream_mappings():
                 vin = mapping["vin"]
                 previous = state["last_attempt_by_vin"].get(vin)
@@ -160,36 +160,35 @@ class BmwCarDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         state["last_attempt_by_vin"][vin] = now.isoformat()
                         self._save_rest_state(state)
                         continue
-                if state["count"] >= REST_DAILY_CALL_LIMIT:
-                    self.logger.warning("Local BMW REST daily call limit reached")
-                    break
+                due_vins.append(vin)
+            if not due_vins:
+                return
 
+            try:
+                token = await self._token_manager.async_get_access_token()
+                container_id = await self._async_get_rest_container(token, state)
+            except (BmwCarDataApiError, BmwCarDataOAuthError, ValueError) as err:
+                self._rest_available_by_vin = {
+                    mapping["vin"]: False for mapping in self._build_stream_mappings()
+                }
+                if not self._handle_rest_error(err, state):
+                    self.logger.warning("BMW REST container setup unavailable: %s", err)
+                self.async_set_updated_data(self._build_payload())
+                return
+
+            for vin in due_vins:
                 try:
-                    token = await self._token_manager.async_get_access_token()
-                    state["last_attempt_by_vin"][vin] = now.isoformat()
-                    state["count"] += 1
-                    self._save_rest_state(state)
-                    telematic = await self._rest_api.async_get_telematic_data(
-                        access_token=token, vin=vin, container_id=self.rest_container_id
+                    state["last_attempt_by_vin"][vin] = datetime.now(UTC).isoformat()
+                    telematic = await self._async_rest_request(
+                        state,
+                        lambda: self._rest_api.async_get_telematic_data(
+                            access_token=token, vin=vin, container_id=container_id
+                        ),
                     )
-                except BmwCarDataRateLimitError as err:
-                    state["blocked"] = True
-                    self._save_rest_state(state)
-                    self._rest_available_by_vin = {
-                        item["vin"]: False for item in self._build_stream_mappings()
-                    }
-                    self.logger.warning("%s; REST polling paused until next UTC day", err)
-                    break
-                except (BmwCarDataRestAuthError, BmwCarDataOAuthError) as err:
-                    self._rest_authorization_failed = True
-                    self._rest_available_by_vin = {
-                        item["vin"]: False for item in self._build_stream_mappings()
-                    }
-                    self.logger.error("BMW REST authorization failed: %s", err)
-                    self._entry.async_start_reauth(self.hass)
-                    break
-                except (BmwCarDataApiError, ValueError) as err:
+                except (BmwCarDataApiError, BmwCarDataOAuthError, ValueError) as err:
                     self._rest_available_by_vin[vin] = False
+                    if self._handle_rest_error(err, state):
+                        break
                     self.logger.warning("BMW REST snapshot unavailable: %s", err)
                 else:
                     missing = [key for key in REST_SENSOR_KEYS if key not in telematic]
@@ -200,6 +199,104 @@ class BmwCarDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     }
                     self._rest_available_by_vin[vin] = True
             self.async_set_updated_data(self._build_payload())
+
+    async def _async_get_rest_container(
+        self, token: str, state: dict[str, Any]
+    ) -> str:
+        """Reuse the newest compatible active container, checking once per UTC day."""
+        now = datetime.now(UTC)
+        cached = state.get("container_id")
+        if (
+            isinstance(cached, str) and cached
+            and state.get("container_checked_date") == now.date().isoformat()
+        ):
+            return cached
+        if state.get("container_limit_date") == now.date().isoformat():
+            raise BmwCarDataApiError(
+                "No compatible container and BMW's 10-container limit is reached; "
+                "remove a container manually, then wait for the next UTC day's check"
+            )
+        previous = state.get("container_discovery_attempt")
+        if previous:
+            try:
+                if now - datetime.fromisoformat(previous) < timedelta(hours=REST_UPDATE_HOURS):
+                    raise BmwCarDataApiError("Container discovery will retry after two hours")
+            except (TypeError, ValueError) as err:
+                self.logger.error("Invalid persisted BMW container discovery timestamp")
+                state["container_discovery_attempt"] = now.isoformat()
+                self._save_rest_state(state)
+                raise BmwCarDataApiError("Invalid container discovery polling state") from err
+
+        state["container_discovery_attempt"] = now.isoformat()
+        self._save_rest_state(state)
+        containers = await self._async_rest_request(
+            state, lambda: self._rest_api.async_list_containers(access_token=token)
+        )
+        for container in sorted(
+            containers,
+            key=lambda item: datetime.fromisoformat(item["created"].replace("Z", "+00:00")),
+            reverse=True,
+        ):
+            descriptors = await self._async_rest_request(
+                state,
+                lambda: self._rest_api.async_get_container_descriptors(
+                    access_token=token, container_id=container["containerId"]
+                ),
+            )
+            if set(REST_SENSOR_KEYS).issubset(descriptors):
+                container_id = container["containerId"]
+                break
+        else:
+            if len(containers) >= 10:
+                state["container_limit_date"] = now.date().isoformat()
+                self._save_rest_state(state)
+                raise BmwCarDataApiError(
+                    "No compatible container and BMW's 10-container limit is reached; "
+                    "existing containers will not be deleted"
+                )
+            container_id = await self._async_rest_request(
+                state, lambda: self._rest_api.async_create_container(access_token=token)
+            )
+            self.logger.info("Created a BMW CarData container for the three REST sensor fields")
+
+        state.update(
+            container_id=container_id,
+            container_checked_date=datetime.now(UTC).date().isoformat(),
+        )
+        self._save_rest_state(state)
+        return container_id
+
+    async def _async_rest_request(
+        self, state: dict[str, Any], request: Callable[[], Awaitable[_RestResult]]
+    ) -> _RestResult:
+        """Count discovery, creation and data requests against the same daily quota."""
+        today = datetime.now(UTC).date().isoformat()
+        if state.get("date") != today:
+            state.update(date=today, count=0, blocked=False)
+        if state.get("blocked") or state["count"] >= REST_DAILY_CALL_LIMIT:
+            raise BmwCarDataRateLimitError("Local BMW REST daily call limit reached")
+        state["count"] += 1
+        self._save_rest_state(state)
+        return await request()
+
+    def _handle_rest_error(
+        self, err: Exception, state: dict[str, Any]
+    ) -> bool:
+        """Pause only REST for quota or authorization failures."""
+        if isinstance(err, BmwCarDataRateLimitError):
+            state["blocked"] = True
+            self._save_rest_state(state)
+            self.logger.warning("%s; REST polling paused until next UTC day", err)
+        elif isinstance(err, (BmwCarDataRestAuthError, BmwCarDataOAuthError)):
+            self._rest_authorization_failed = True
+            self.logger.error("BMW REST authorization failed: %s", err)
+            self._entry.async_start_reauth(self.hass)
+        else:
+            return False
+        self._rest_available_by_vin = {
+            mapping["vin"]: False for mapping in self._build_stream_mappings()
+        }
+        return True
 
     def _save_rest_state(self, state: dict[str, Any]) -> None:
         """Persist attempts before requests so reloads cannot consume extra quota."""
@@ -225,7 +322,7 @@ class BmwCarDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         vins = set(self._telematic_cache_by_vin)
         stream_topic = self._entry.options.get(
             CONF_STREAM_TOPIC,
-            self._entry.data.get(CONF_STREAM_TOPIC, ""),
+            self._entry.data.get(CONF_STREAM_TOPIC, DEFAULT_STREAM_TOPIC),
         )
         if isinstance(stream_topic, str):
             for segment in stream_topic.split("/"):
