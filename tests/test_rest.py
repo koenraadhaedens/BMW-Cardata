@@ -1,4 +1,4 @@
-"""Isolated REST tests with lightweight Home Assistant interfaces."""
+"""Isolated integration tests with lightweight Home Assistant interfaces."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 import importlib.util
+import json
 import logging
 from pathlib import Path
 import sys
@@ -99,6 +100,10 @@ def load_modules():
             "SensorDeviceClass": SimpleNamespace(BATTERY="battery", DISTANCE="distance"),
             "SensorStateClass": SimpleNamespace(MEASUREMENT="measurement"),
         },
+        "homeassistant.components.binary_sensor": {
+            "BinarySensorEntity": type("BinarySensorEntity", (), {}),
+            "BinarySensorEntityDescription": SensorDescription,
+        },
     }
     modules = {}
     for name, values in interfaces.items():
@@ -121,7 +126,7 @@ def load_modules():
     with patch.dict(sys.modules, modules):
         for name in (
             "const", "api", "token_manager", "stream_manager", "coordinator",
-            "sensor", "config_flow", "integration",
+            "sensor", "binary_sensor", "config_flow", "integration",
         ):
             full_name = f"custom_components.bmw_cardata.{name}"
             path = ROOT / ("__init__.py" if name == "integration" else f"{name}.py")
@@ -558,6 +563,195 @@ class RestTests(unittest.IsolatedAsyncioTestCase):
         values = await asyncio.gather(manager.async_get_access_token(), manager.async_get_id_token())
         self.assertEqual(values, ["new", "new-id"])
         auth.refresh_token.assert_awaited_once()
+
+
+class StreamTaskHost:
+    """Model HA's distinct startup-tracked and shutdown-cancelled task buckets."""
+
+    def __init__(self):
+        self.startup_tasks = set()
+        self.background_tasks = set()
+        self.async_add_executor_job = AsyncMock(return_value=None)
+
+    def _create_task(self, coroutine, bucket, name=None):
+        task = asyncio.create_task(coroutine, name=name)
+        bucket.add(task)
+        task.add_done_callback(bucket.discard)
+        return task
+
+    def async_create_task(self, coroutine):
+        return self._create_task(coroutine, self.startup_tasks)
+
+    def async_create_background_task(self, coroutine, name, eager_start=True):
+        return self._create_task(coroutine, self.background_tasks, name)
+
+    async def async_block_till_done(self):
+        while self.startup_tasks:
+            await asyncio.wait(tuple(self.startup_tasks))
+
+    async def async_shutdown(self):
+        await self.cancel_tasks(self.background_tasks)
+
+    @staticmethod
+    async def cancel_tasks(tasks):
+        pending = tuple(tasks)
+        for task in pending:
+            task.cancel()
+        for task in pending:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+
+class StreamClient:
+    """Keep a simulated MQTT connection open until its task is cancelled."""
+
+    def __init__(self):
+        self.messages = self
+        self.queue = asyncio.Queue()
+        self.subscribed = asyncio.Event()
+        self.closed = asyncio.Event()
+        self.topic = None
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        self.closed.set()
+        return False
+
+    async def subscribe(self, topic):
+        self.topic = topic
+        self.subscribed.set()
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        return await self.queue.get()
+
+
+class StreamLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.hass = StreamTaskHost()
+        self.entry_tasks = set()
+
+        def entry_background_task(hass, coroutine, name):
+            task = hass.async_create_background_task(coroutine, name)
+            self.entry_tasks.add(task)
+            task.add_done_callback(self.entry_tasks.discard)
+            return task
+
+        self.entry = SimpleNamespace(
+            entry_id="stream-test", options={}, data={
+                C.CONF_GCID: "account", C.CONF_SCOPE: C.STREAMING_SCOPE,
+                C.CONF_STREAM_TOPIC: "#", C.CONF_USE_REST: False,
+            },
+            async_create_background_task=entry_background_task,
+        )
+        self.tokens = SimpleNamespace(
+            async_get_id_token=AsyncMock(return_value="id-token"),
+            async_get_access_token=AsyncMock(return_value="access-token"),
+        )
+        self.client = StreamClient()
+        mqtt = ModuleType("aiomqtt")
+        mqtt.Client = Mock(return_value=self.client)
+        mqtt.MqttError = type("MqttError", (Exception,), {})
+        self.mqtt_patch = patch.dict(sys.modules, {"aiomqtt": mqtt})
+        self.mqtt_patch.start()
+        self.addCleanup(self.mqtt_patch.stop)
+        self.manager = MODULES.stream_manager.BmwCarDataStreamManager(
+            self.hass, entry=self.entry, token_manager=self.tokens,
+        )
+        self.addAsyncCleanup(self.manager.async_stop)
+
+    async def test_mqtt_background_stream_does_not_block_startup(self):
+        await self.manager.async_start()
+        await asyncio.wait_for(self.client.subscribed.wait(), 1)
+        task = self.manager._task
+        await self.manager.async_start()
+        self.assertIs(self.manager._task, task)
+        await asyncio.wait_for(self.hass.async_block_till_done(), 1)
+        self.assertFalse(task.done())
+        self.assertIn(task, self.entry_tasks)
+        self.assertEqual(self.client.topic, "account/#")
+
+    async def test_mqtt_background_stream_closes_on_entry_unload_and_ha_shutdown(self):
+        for shutdown in (False, True):
+            with self.subTest(shutdown=shutdown):
+                self.client.subscribed.clear()
+                self.client.closed.clear()
+                await self.manager.async_start()
+                await asyncio.wait_for(self.client.subscribed.wait(), 1)
+                task = self.manager._task
+                if shutdown:
+                    await asyncio.wait_for(self.hass.async_shutdown(), 1)
+                else:
+                    await asyncio.wait_for(self.hass.cancel_tasks(self.entry_tasks), 1)
+                self.assertTrue(task.cancelled())
+                self.assertTrue(self.client.closed.is_set())
+                await self.manager.async_stop()
+                self.assertIsNone(self.manager._task)
+
+    async def test_mqtt_background_stream_stops_promptly_during_reconnect_backoff(self):
+        backoff = asyncio.Event()
+
+        async def wait_in_backoff(_seconds):
+            backoff.set()
+            await asyncio.Event().wait()
+
+        self.manager._async_connect_once = AsyncMock(side_effect=RuntimeError("offline"))
+        with patch.object(MODULES.stream_manager.asyncio, "sleep", side_effect=wait_in_backoff):
+            await self.manager.async_start()
+            await asyncio.wait_for(backoff.wait(), 1)
+            await asyncio.wait_for(self.manager.async_stop(), 1)
+        self.assertIsNone(self.manager._task)
+        self.assertFalse(self.entry_tasks)
+
+    async def test_mqtt_background_stream_delivers_vehicle_and_sensor_updates(self):
+        rest_api = SimpleNamespace(async_get_telematic_data=AsyncMock())
+        coordinator = MODULES.coordinator.BmwCarDataCoordinator(
+            self.hass, entry=self.entry, stream_manager=self.manager,
+            rest_api=rest_api, token_manager=self.tokens,
+        )
+        delivered = asyncio.Event()
+
+        async def on_updates():
+            await coordinator.async_apply_stream_snapshot()
+            delivered.set()
+
+        self.manager._on_updates = on_updates
+        await coordinator.async_initialize()
+        await asyncio.wait_for(self.client.subscribed.wait(), 1)
+        self.assertEqual(coordinator.data[C.CONF_MAPPINGS], [])
+        payload = {"vin": VIN, "telematicData": {
+            "soc": {"value": "70"},
+            "vehicle.vehicle.travelledDistance": {"value": "12345"},
+            "vehicle.cabin.door.lock.status": {"value": "LOCKED"},
+            "vehicle.drivetrain.lastRemainingRange": {"value": "500"},
+        }}
+        await self.client.queue.put(SimpleNamespace(
+            topic=SimpleNamespace(value=f"account/{VIN}"),
+            payload=json.dumps(payload).encode(),
+        ))
+        await asyncio.wait_for(delivered.wait(), 1)
+        self.assertEqual([mapping["vin"] for mapping in coordinator.data[C.CONF_MAPPINGS]], [VIN])
+        for key, expected in (("battery_soc", 70), ("odometer", 12345), ("total_remaining_range", 500)):
+            description = next(item for item in MODULES.sensor.VEHICLE_SENSORS if item.key == key)
+            sensor = MODULES.sensor.BmwCarDataVehicleSensor(
+                coordinator=coordinator, entry=self.entry, vin=VIN, description=description,
+            )
+            self.assertTrue(sensor.available)
+            self.assertEqual(sensor.native_value, expected)
+        door = MODULES.binary_sensor.BmwCarDataVehicleBinarySensor(
+            coordinator=coordinator, entry=self.entry, vin=VIN,
+            description=MODULES.binary_sensor.VEHICLE_BINARY_SENSORS[0],
+        )
+        self.assertTrue(door.available)
+        self.assertTrue(door.is_on)
+        rest_api.async_get_telematic_data.assert_not_awaited()
+        await asyncio.wait_for(self.hass.async_block_till_done(), 1)
 
 
 class ApiTests(unittest.IsolatedAsyncioTestCase):

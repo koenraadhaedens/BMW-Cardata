@@ -54,6 +54,11 @@ The integration uses MQTT for all values except the three optional REST sensors:
 3. Stream host and port use BMW defaults automatically (`customer.streaming-cardata.bmwgroup.com:9000`).
 4. The integration uses your BMW `gcid` as MQTT username and token as MQTT password.
 
+The MQTT listener runs as an entry-owned background task: it does not hold up Home
+Assistant startup and is cancelled when the integration unloads or Home Assistant
+shuts down. With the default `#` topic, mapped vehicles remain zero until BMW sends
+the first vehicle message after a restart.
+
 If streaming was not enabled during initial setup, remove and re-add the integration with
 streaming enabled. BMW must issue a new token containing the
 `cardata:streaming:read` scope; changing the option alone cannot add that scope.

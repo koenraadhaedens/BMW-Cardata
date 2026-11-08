@@ -91,12 +91,20 @@ class BmwCarDataStreamManager:
     async def async_start(self) -> None:
         """Start MQTT listener task."""
         if not self.enabled:
+            self._logger.warning(
+                "BMW MQTT cannot start: host, topic, account ID or streaming scope "
+                "is missing; check BMW authorization"
+            )
             return
         if self._task and not self._task.done():
             return
 
         self._stop_event.clear()
-        self._task = self._hass.async_create_task(self._async_run())
+        self._task = self._entry.async_create_background_task(
+            self._hass,
+            self._async_run(),
+            f"BMW CarData MQTT stream ({self._entry.entry_id})",
+        )
 
     async def async_stop(self) -> None:
         """Stop MQTT listener task."""
