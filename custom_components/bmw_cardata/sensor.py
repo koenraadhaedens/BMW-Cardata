@@ -31,6 +31,7 @@ from .const import (
     REST_CHARGING_STATUS,
 )
 from .coordinator import BmwCarDataCoordinator
+from .entity import BmwCarDataVehicleEntity
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -47,7 +48,11 @@ class VehicleSensorDescription(SensorEntityDescription):
 VEHICLE_SENSORS: tuple[VehicleSensorDescription, ...] = (
     VehicleSensorDescription(
         key="odometer",
-        entity_category=EntityCategory.DIAGNOSTIC,
+        translation_key="odometer",
+        icon="mdi:counter",
+        native_unit_of_measurement="km",
+        device_class=SensorDeviceClass.DISTANCE,
+        state_class=SensorStateClass.TOTAL_INCREASING,
         value_fn=lambda _mapping, _basic, telematic: _find_numeric_telematic_value(
             telematic,
             (("travelled", "distance"), ("travelleddistance",)),
@@ -57,7 +62,9 @@ VEHICLE_SENSORS: tuple[VehicleSensorDescription, ...] = (
     VehicleSensorDescription(
         key="fuel_level",
         translation_key="fuel_level",
-        entity_category=EntityCategory.DIAGNOSTIC,
+        icon="mdi:gas-station",
+        native_unit_of_measurement="%",
+        state_class=SensorStateClass.MEASUREMENT,
         value_fn=lambda _mapping, _basic, telematic: _round_percent_if_applicable(
             _find_numeric_telematic_value(
                 telematic,
@@ -74,7 +81,11 @@ VEHICLE_SENSORS: tuple[VehicleSensorDescription, ...] = (
     ),
     VehicleSensorDescription(
         key="fuel_remaining",
-        entity_category=EntityCategory.DIAGNOSTIC,
+        translation_key="fuel_remaining",
+        icon="mdi:gas-station",
+        native_unit_of_measurement="L",
+        device_class=SensorDeviceClass.VOLUME_STORAGE,
+        state_class=SensorStateClass.MEASUREMENT,
         value_fn=lambda _mapping, _basic, telematic: _find_numeric_telematic_value(
             telematic,
             (("remaining", "fuel"),),
@@ -84,7 +95,10 @@ VEHICLE_SENSORS: tuple[VehicleSensorDescription, ...] = (
     VehicleSensorDescription(
         key="remaining_range",
         translation_key="remaining_range",
-        entity_category=EntityCategory.DIAGNOSTIC,
+        icon="mdi:map-marker-distance",
+        native_unit_of_measurement="km",
+        device_class=SensorDeviceClass.DISTANCE,
+        state_class=SensorStateClass.MEASUREMENT,
         value_fn=lambda _mapping, _basic, telematic: _find_numeric_telematic_value(
             telematic,
             (
@@ -98,7 +112,7 @@ VEHICLE_SENSORS: tuple[VehicleSensorDescription, ...] = (
     VehicleSensorDescription(
         key="total_remaining_range",
         translation_key="total_remaining_range",
-        entity_category=EntityCategory.DIAGNOSTIC,
+        icon="mdi:map-marker-distance",
         native_unit_of_measurement="km",
         device_class=SensorDeviceClass.DISTANCE,
         state_class=SensorStateClass.MEASUREMENT,
@@ -110,7 +124,11 @@ VEHICLE_SENSORS: tuple[VehicleSensorDescription, ...] = (
     ),
     VehicleSensorDescription(
         key="electric_remaining_range",
-        entity_category=EntityCategory.DIAGNOSTIC,
+        translation_key="electric_remaining_range",
+        icon="mdi:map-marker-distance",
+        native_unit_of_measurement="km",
+        device_class=SensorDeviceClass.DISTANCE,
+        state_class=SensorStateClass.MEASUREMENT,
         value_fn=lambda _mapping, _basic, telematic: _find_numeric_telematic_value(
             telematic,
             (
@@ -131,12 +149,13 @@ VEHICLE_SENSORS: tuple[VehicleSensorDescription, ...] = (
         native_unit_of_measurement="%",
         device_class=SensorDeviceClass.BATTERY,
         state_class=SensorStateClass.MEASUREMENT,
-        entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda _mapping, _basic, telematic: _find_battery_level_value(telematic),
     ),
     VehicleSensorDescription(
         key="battery_max_energy",
-        entity_category=EntityCategory.DIAGNOSTIC,
+        translation_key="battery_max_energy",
+        device_class=SensorDeviceClass.ENERGY_STORAGE,
+        state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement="kWh",
         value_fn=lambda _mapping, _basic, telematic: _find_numeric_telematic_value(
             telematic,
@@ -148,7 +167,7 @@ VEHICLE_SENSORS: tuple[VehicleSensorDescription, ...] = (
         key="charging_status",
         translation_key="charging_status",
         rest_key=REST_CHARGING_STATUS,
-        entity_category=EntityCategory.DIAGNOSTIC,
+        icon="mdi:ev-station",
         value_fn=lambda _mapping, _basic, telematic: _find_text_telematic_value(
             telematic,
             # Priority order: most-specific hierarchical keys first, then flat API keys,
@@ -173,7 +192,7 @@ VEHICLE_SENSORS: tuple[VehicleSensorDescription, ...] = (
         key="charging_method",
         translation_key="charging_method",
         rest_key=REST_CHARGING_METHOD,
-        entity_category=EntityCategory.DIAGNOSTIC,
+        icon="mdi:power-plug",
         value_fn=lambda _mapping, _basic, telematic: _find_text_telematic_value(
             telematic, exact_keys=(REST_CHARGING_METHOD,)
         ),
@@ -182,6 +201,7 @@ VEHICLE_SENSORS: tuple[VehicleSensorDescription, ...] = (
         key="current_latitude",
         translation_key="current_latitude",
         entity_category=EntityCategory.DIAGNOSTIC,
+        icon="mdi:map-marker",
         value_fn=lambda _mapping, _basic, telematic: _find_numeric_telematic_value(
             telematic,
             (
@@ -196,6 +216,7 @@ VEHICLE_SENSORS: tuple[VehicleSensorDescription, ...] = (
         key="current_longitude",
         translation_key="current_longitude",
         entity_category=EntityCategory.DIAGNOSTIC,
+        icon="mdi:map-marker",
         value_fn=lambda _mapping, _basic, telematic: _find_numeric_telematic_value(
             telematic,
             (
@@ -208,7 +229,8 @@ VEHICLE_SENSORS: tuple[VehicleSensorDescription, ...] = (
     ),
     VehicleSensorDescription(
         key="sunroof_status",
-        entity_category=EntityCategory.DIAGNOSTIC,
+        translation_key="sunroof_status",
+        icon="mdi:car",
         value_fn=lambda _mapping, _basic, telematic: _find_text_telematic_value(
             telematic,
             exact_keys=("vehicle.cabin.sunroof.status",),
@@ -216,7 +238,8 @@ VEHICLE_SENSORS: tuple[VehicleSensorDescription, ...] = (
     ),
     VehicleSensorDescription(
         key="sunroof_tilt_status",
-        entity_category=EntityCategory.DIAGNOSTIC,
+        translation_key="sunroof_tilt_status",
+        icon="mdi:car",
         value_fn=lambda _mapping, _basic, telematic: _find_text_telematic_value(
             telematic,
             exact_keys=("vehicle.cabin.sunroof.tiltStatus",),
@@ -224,7 +247,8 @@ VEHICLE_SENSORS: tuple[VehicleSensorDescription, ...] = (
     ),
     VehicleSensorDescription(
         key="sunroof_overall_status",
-        entity_category=EntityCategory.DIAGNOSTIC,
+        translation_key="sunroof_overall_status",
+        icon="mdi:car",
         value_fn=lambda _mapping, _basic, telematic: _find_text_telematic_value(
             telematic,
             exact_keys=("vehicle.cabin.sunroof.overallStatus",),
@@ -251,10 +275,6 @@ async def async_setup_entry(
 
     def _add_vin_entities() -> None:
         mappings = coordinator.data.get(CONF_MAPPINGS, []) if coordinator.data else []
-        basic_data_by_vin = (
-            coordinator.data.get(CONF_BASIC_DATA_BY_VIN, {}) if coordinator.data else {}
-        )
-
         new_entities: list[SensorEntity] = []
         for mapping in mappings:
             vin = mapping.get("vin")
@@ -291,7 +311,7 @@ class BmwCarDataMappedVehiclesSensor(CoordinatorEntity[BmwCarDataCoordinator], S
 
     _attr_icon = "mdi:car-multiple"
     _attr_has_entity_name = True
-    _attr_name = "Mapped Vehicles"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_translation_key = "mapped_vehicles"
 
     def __init__(self, *, coordinator: BmwCarDataCoordinator, entry: ConfigEntry) -> None:
@@ -330,10 +350,8 @@ class BmwCarDataMappedVehiclesSensor(CoordinatorEntity[BmwCarDataCoordinator], S
         }
 
 
-class BmwCarDataVehicleSensor(CoordinatorEntity[BmwCarDataCoordinator], SensorEntity):
+class BmwCarDataVehicleSensor(BmwCarDataVehicleEntity, SensorEntity):
     """VIN-level BMW CarData sensor."""
-
-    _attr_has_entity_name = True
 
     def __init__(
         self,
@@ -344,11 +362,9 @@ class BmwCarDataVehicleSensor(CoordinatorEntity[BmwCarDataCoordinator], SensorEn
         description: VehicleSensorDescription,
     ) -> None:
         """Initialize VIN-level sensor."""
-        super().__init__(coordinator)
+        super().__init__(coordinator, vin)
         self.entity_description = description
-        self._vin = vin
         self._attr_unique_id = f"{entry.entry_id}_{vin}_{description.key}"
-        self._attr_name = f"{vin} {description.key.replace('_', ' ').title()}"
 
     @property
     def available(self) -> bool:

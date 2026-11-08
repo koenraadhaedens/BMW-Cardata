@@ -54,6 +54,7 @@ class HomeAssistantError(Exception):
 @dataclass(frozen=True, kw_only=True)
 class SensorDescription:
     key: str
+    icon: str | None = None
     translation_key: str | None = None
     entity_category: str | None = None
     native_unit_of_measurement: str | None = None
@@ -105,17 +106,28 @@ def load_modules():
         },
         "homeassistant.helpers.aiohttp_client": {"async_get_clientsession": Mock()},
         "homeassistant.helpers.entity_platform": {"AddEntitiesCallback": object},
+        "homeassistant.helpers.device_registry": {"DeviceInfo": dict},
         "homeassistant.components.sensor": {
             "SensorEntity": type("SensorEntity", (), {}),
             "SensorEntityDescription": SensorDescription,
-            "SensorDeviceClass": SimpleNamespace(BATTERY="battery", DISTANCE="distance"),
-            "SensorStateClass": SimpleNamespace(MEASUREMENT="measurement"),
+            "SensorDeviceClass": SimpleNamespace(
+                BATTERY="battery", DISTANCE="distance", VOLUME_STORAGE="volume_storage",
+                ENERGY_STORAGE="energy_storage",
+            ),
+            "SensorStateClass": SimpleNamespace(
+                MEASUREMENT="measurement", TOTAL_INCREASING="total_increasing",
+            ),
         },
         "homeassistant.components.binary_sensor": {
             "BinarySensorEntity": type("BinarySensorEntity", (), {}),
             "BinarySensorEntityDescription": SensorDescription,
+            "BinarySensorDeviceClass": SimpleNamespace(BATTERY_CHARGING="battery_charging"),
         },
         "homeassistant.components.button": {"ButtonEntity": type("ButtonEntity", (), {})},
+        "homeassistant.components.device_tracker": {
+            "TrackerEntity": type("TrackerEntity", (), {}),
+            "SourceType": SimpleNamespace(GPS="gps"),
+        },
     }
     modules = {}
     for name, values in interfaces.items():
@@ -138,7 +150,8 @@ def load_modules():
     with patch.dict(sys.modules, modules):
         for name in (
             "const", "api", "token_manager", "stream_manager", "coordinator",
-            "sensor", "binary_sensor", "button", "config_flow", "integration",
+            "entity", "sensor", "binary_sensor", "button", "device_tracker",
+            "config_flow", "integration",
         ):
             full_name = f"custom_components.bmw_cardata.{name}"
             path = ROOT / ("__init__.py" if name == "integration" else f"{name}.py")
@@ -153,6 +166,73 @@ def load_modules():
 MODULES = load_modules()
 C = MODULES.const
 VIN = "WBA00000000000001"
+
+
+class VehicleEntityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_all_platforms_group_existing_and_new_vehicles_without_duplicates(self):
+        entry = SimpleNamespace(entry_id="test", async_on_unload=Mock())
+        coordinator = SimpleNamespace(
+            data={C.CONF_MAPPINGS: [{"vin": VIN}]},
+            use_rest=True,
+            async_add_listener=Mock(return_value=lambda: None),
+        )
+        hass = SimpleNamespace(data={
+            C.DOMAIN: {C.DATA_ENTRIES: {"test": {"coordinator": coordinator}}},
+        })
+        second_vin = "WBA00000000000002"
+        for platform in (
+            MODULES.sensor, MODULES.binary_sensor, MODULES.device_tracker, MODULES.button,
+        ):
+            with self.subTest(platform=platform.__name__):
+                coordinator.data[C.CONF_MAPPINGS] = [{"vin": VIN}]
+                entities = []
+                await platform.async_setup_entry(hass, entry, entities.extend)
+                listener = coordinator.async_add_listener.call_args.args[0]
+                original_count = len(entities)
+                coordinator.data[C.CONF_MAPPINGS].append({"vin": second_vin})
+                listener()
+                listener()
+                vehicle_entities = [entity for entity in entities if hasattr(entity, "_vin")]
+                first = [entity for entity in vehicle_entities if entity._vin == VIN]
+                second = [entity for entity in vehicle_entities if entity._vin == second_vin]
+                self.assertTrue(first)
+                self.assertEqual(len(first), len(second))
+                self.assertEqual(len(entities), original_count + len(second))
+                for entity in vehicle_entities:
+                    self.assertEqual(entity._attr_device_info, {
+                        "identifiers": {(C.DOMAIN, entity._vin)},
+                        "name": f"BMW {entity._vin}",
+                        "manufacturer": "BMW",
+                    })
+                    key = (
+                        "tracker" if platform is MODULES.device_tracker
+                        else "refresh_rest" if platform is MODULES.button
+                        else entity.entity_description.key
+                    )
+                    self.assertEqual(entity._attr_unique_id, f"test_{entity._vin}_{key}")
+                    self.assertFalse(hasattr(entity, "_attr_name"))
+                if platform is MODULES.sensor:
+                    mapped = next(entity for entity in entities if not hasattr(entity, "_vin"))
+                    self.assertFalse(hasattr(mapped, "_attr_device_info"))
+
+    def test_vehicle_labels_are_translated_and_daily_readings_are_not_diagnostics(self):
+        strings = json.loads((ROOT / "strings.json").read_text(encoding="utf-8"))
+        translations = json.loads(
+            (ROOT / "translations" / "en.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(strings["entity"], translations["entity"])
+        for platform, descriptions in (
+            ("sensor", MODULES.sensor.VEHICLE_SENSORS),
+            ("binary_sensor", MODULES.binary_sensor.VEHICLE_BINARY_SENSORS),
+        ):
+            for description in descriptions:
+                with self.subTest(platform=platform, key=description.key):
+                    self.assertTrue(strings["entity"][platform][description.translation_key]["name"])
+                    if description.key not in ("current_latitude", "current_longitude"):
+                        self.assertIsNone(description.entity_category)
+                    self.assertTrue(description.icon or description.device_class)
+        self.assertTrue(strings["entity"]["device_tracker"]["location"]["name"])
+        self.assertTrue(strings["entity"]["button"]["refresh_rest"]["name"])
 
 
 class Clock(datetime):

@@ -8,7 +8,6 @@ from homeassistant.components.device_tracker import SourceType, TrackerEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import (
     CONF_MAPPINGS,
@@ -17,6 +16,7 @@ from .const import (
     DOMAIN,
 )
 from .coordinator import BmwCarDataCoordinator
+from .entity import BmwCarDataVehicleEntity
 from .sensor import _find_numeric_telematic_value
 
 
@@ -60,11 +60,11 @@ async def async_setup_entry(
     entry.async_on_unload(coordinator.async_add_listener(_add_vin_entities))
 
 
-class BmwCarDataVehicleTracker(CoordinatorEntity[BmwCarDataCoordinator], TrackerEntity):
+class BmwCarDataVehicleTracker(BmwCarDataVehicleEntity, TrackerEntity):
     """GPS device tracker for a BMW vehicle."""
 
-    _attr_has_entity_name = True
     _attr_icon = "mdi:car"
+    _attr_translation_key = "location"
 
     def __init__(
         self,
@@ -74,10 +74,8 @@ class BmwCarDataVehicleTracker(CoordinatorEntity[BmwCarDataCoordinator], Tracker
         vin: str,
     ) -> None:
         """Initialize tracker."""
-        super().__init__(coordinator)
-        self._vin = vin
+        super().__init__(coordinator, vin)
         self._attr_unique_id = f"{entry.entry_id}_{vin}_tracker"
-        self._attr_name = f"{vin} Location"
 
     @property
     def source_type(self) -> SourceType:

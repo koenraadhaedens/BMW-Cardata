@@ -7,14 +7,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from homeassistant.components.binary_sensor import (
+    BinarySensorDeviceClass,
     BinarySensorEntity,
     BinarySensorEntityDescription,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import (
     CONF_BASIC_DATA_BY_VIN,
@@ -24,6 +23,7 @@ from .const import (
     DOMAIN,
 )
 from .coordinator import BmwCarDataCoordinator
+from .entity import BmwCarDataVehicleEntity
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -40,13 +40,13 @@ VEHICLE_BINARY_SENSORS: tuple[VehicleBinarySensorDescription, ...] = (
     VehicleBinarySensorDescription(
         key="doors_closed",
         translation_key="doors_closed",
-        entity_category=EntityCategory.DIAGNOSTIC,
+        icon="mdi:car-key",
         value_fn=lambda _mapping, _basic, telematic: _car_locked_from_telematic(telematic),
     ),
     VehicleBinarySensorDescription(
         key="is_charging",
         translation_key="is_charging",
-        entity_category=EntityCategory.DIAGNOSTIC,
+        device_class=BinarySensorDeviceClass.BATTERY_CHARGING,
         value_fn=lambda _mapping, _basic, telematic: _is_vehicle_charging_from_telematic(telematic),
     ),
 )
@@ -95,11 +95,9 @@ async def async_setup_entry(
 
 
 class BmwCarDataVehicleBinarySensor(
-    CoordinatorEntity[BmwCarDataCoordinator], BinarySensorEntity
+    BmwCarDataVehicleEntity, BinarySensorEntity
 ):
     """VIN-level BMW CarData binary sensor."""
-
-    _attr_has_entity_name = True
 
     def __init__(
         self,
@@ -110,11 +108,9 @@ class BmwCarDataVehicleBinarySensor(
         description: VehicleBinarySensorDescription,
     ) -> None:
         """Initialize VIN-level binary sensor."""
-        super().__init__(coordinator)
+        super().__init__(coordinator, vin)
         self.entity_description = description
-        self._vin = vin
         self._attr_unique_id = f"{entry.entry_id}_{vin}_{description.key}"
-        self._attr_name = f"{vin} {description.key.replace('_', ' ').title()}"
 
     @property
     def is_on(self) -> bool | None:

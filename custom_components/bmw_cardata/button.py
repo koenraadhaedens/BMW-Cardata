@@ -7,10 +7,10 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import CONF_MAPPINGS, DATA_ENTRIES, DOMAIN
 from .coordinator import BmwCarDataCoordinator
+from .entity import BmwCarDataVehicleEntity
 
 
 async def async_setup_entry(
@@ -44,10 +44,9 @@ async def async_setup_entry(
     entry.async_on_unload(coordinator.async_add_listener(_add_vin_entities))
 
 
-class BmwCarDataRestRefreshButton(CoordinatorEntity[BmwCarDataCoordinator], ButtonEntity):
+class BmwCarDataRestRefreshButton(BmwCarDataVehicleEntity, ButtonEntity):
     """Request BMW's latest stored battery and charging readings for one VIN."""
 
-    _attr_has_entity_name = True
     _attr_icon = "mdi:refresh"
     _attr_entity_category = EntityCategory.CONFIG
     _attr_translation_key = "refresh_rest"
@@ -56,10 +55,8 @@ class BmwCarDataRestRefreshButton(CoordinatorEntity[BmwCarDataCoordinator], Butt
         self, *, coordinator: BmwCarDataCoordinator, entry: ConfigEntry, vin: str
     ) -> None:
         """Initialize the VIN-level button, independently of REST sensor availability."""
-        super().__init__(coordinator)
-        self._vin = vin
+        super().__init__(coordinator, vin)
         self._attr_unique_id = f"{entry.entry_id}_{vin}_refresh_rest"
-        self._attr_name = f"{vin} Refresh REST data"
 
     @property
     def available(self) -> bool:

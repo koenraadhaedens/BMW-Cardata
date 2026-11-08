@@ -100,6 +100,17 @@ until BMW publishes their selected attributes, commonly after activity on the ca
 
 ## Notes
 
+- Each discovered VIN appears as a separate BMW device under the integration,
+  with its sensors, GPS tracker and optional REST refresh button grouped together.
+  Open the device and use the pencil icon to rename it (for example, "BMW i4").
+  The default name is BMW followed by the VIN; no extra REST calls fetch model data.
+- Everyday readings appear under Sensors with readable names, icons and units.
+  Coordinates remain diagnostics and the REST refresh button is a configuration
+  action, not a remote vehicle control. Mapped Vehicles is an integration-level
+  diagnostic rather than belonging to any one car.
+- After updating, restart Home Assistant to associate existing entities with their
+  vehicles. Existing entity IDs, custom names and sensor values are preserved.
+  Car Locked retains its existing meaning: `on` means locked.
 - MQTT entities remain unknown until their values arrive through the stream.
 - Optional REST sensors fetch a startup snapshot, then refresh every two hours.
 - You must subscribe your client to `cardata:streaming:read` before authorizing.

@@ -52,6 +52,11 @@
     }
   },
   "entity": {
+    "device_tracker": {
+      "location": {
+        "name": "Location"
+      }
+    },
     "button": {
       "refresh_rest": {
         "name": "Refresh REST data"
@@ -66,6 +71,27 @@
       }
     },
     "sensor": {
+      "odometer": {
+        "name": "Odometer"
+      },
+      "fuel_remaining": {
+        "name": "Remaining fuel"
+      },
+      "electric_remaining_range": {
+        "name": "Electric remaining range"
+      },
+      "battery_max_energy": {
+        "name": "Maximum battery energy"
+      },
+      "sunroof_status": {
+        "name": "Sunroof"
+      },
+      "sunroof_tilt_status": {
+        "name": "Sunroof tilt"
+      },
+      "sunroof_overall_status": {
+        "name": "Sunroof overall status"
+      },
       "mapped_vehicles": {
         "name": "Mapped Vehicles"
       },
