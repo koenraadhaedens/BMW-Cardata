@@ -56,8 +56,10 @@ The integration uses MQTT for all values except the three optional REST sensors:
 
 The MQTT listener runs as an entry-owned background task: it does not hold up Home
 Assistant startup and is cancelled when the integration unloads or Home Assistant
-shuts down. With the default `#` topic, mapped vehicles remain zero until BMW sends
-the first vehicle message after a restart.
+shuts down. MQTT dependencies are imported through Home Assistant's asynchronous
+import helper, avoiding blocking imports on the event loop. With the default `#`
+topic, vehicles are discovered from saved REST readings or the first incoming MQTT
+message; MQTT-only readings still wait for new stream messages after a restart.
 
 If streaming was not enabled during initial setup, remove and re-add the integration with
 streaming enabled. BMW must issue a new token containing the
@@ -106,7 +108,12 @@ the next UTC day; MQTT continues normally. Failed REST reads mark only the REST
 sensors unavailable, and no immediate retries consume extra calls.
 
 REST readings are BMW's latest stored values, not live vehicle commands. Each REST
-sensor exposes the field's BMW timestamp. Missing values remain unknown.
+sensor exposes the field's BMW timestamp. Successful readings and their availability
+are saved across restarts, so the two-hour cooldown does not leave REST sensors
+unavailable just because Home Assistant restarted. Failed readings remain unavailable
+until a successful refresh; old readings are not used to hide a connection or quota
+failure. Existing installations without saved readings must wait for one successful
+refresh before this restoration is available. Missing values remain unknown.
 
 ## Tests
 

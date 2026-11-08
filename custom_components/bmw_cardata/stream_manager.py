@@ -12,6 +12,7 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_CLIENT_ID
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.importlib import async_import_module
 
 from .const import (
     CONF_SCOPE,
@@ -165,9 +166,11 @@ class BmwCarDataStreamManager:
     async def _async_connect_once(self) -> None:
         """Connect once and process stream messages until disconnect."""
         try:
-            from aiomqtt import Client, MqttError
-        except Exception as err:
-            raise RuntimeError("aiomqtt is not installed") from err
+            mqtt = await async_import_module(self._hass, "aiomqtt")
+        except ImportError as err:
+            raise RuntimeError("Could not import aiomqtt") from err
+        Client = mqtt.Client
+        MqttError = mqtt.MqttError
 
         host = self._config_value(CONF_STREAM_HOST)
         port = int(self._config_value(CONF_STREAM_PORT) or DEFAULT_STREAM_PORT)

@@ -92,6 +92,9 @@ def load_modules():
             "DataUpdateCoordinator": Coordinator, "CoordinatorEntity": CoordinatorEntity,
         },
         "homeassistant.helpers.event": {"async_track_time_interval": Mock()},
+        "homeassistant.helpers.importlib": {
+            "async_import_module": AsyncMock(side_effect=lambda _hass, name: sys.modules[name]),
+        },
         "homeassistant.helpers.aiohttp_client": {"async_get_clientsession": Mock()},
         "homeassistant.helpers.entity_platform": {"AddEntitiesCallback": object},
         "homeassistant.components.sensor": {
@@ -225,6 +228,84 @@ class RestTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.entry.data[C.CONF_REST_REQUEST_STATE]["count"], 14)
         self.api.async_list_containers.assert_awaited_once()
         self.api.async_get_container_descriptors.assert_awaited_once()
+
+    async def test_rest_cache_restores_during_cooldown_without_new_api_calls(self):
+        await self.coordinator.async_refresh_rest()
+        self.entry.data[C.CONF_STREAM_TOPIC] = "#"
+        self.api.async_get_telematic_data.reset_mock()
+        self.api.async_list_containers.reset_mock()
+        self.api.async_get_container_descriptors.reset_mock()
+        for minutes in (10, 20):
+            Clock.current = datetime(2026, 1, 1, tzinfo=UTC) + timedelta(minutes=minutes)
+            self.coordinator = self.make_coordinator()
+            await self.coordinator.async_initialize()
+            self.assertEqual(
+                [mapping["vin"] for mapping in self.coordinator.data[C.CONF_MAPPINGS]], [VIN]
+            )
+            self.assertTrue(self.sensor("battery_soc").available)
+            self.assertEqual(self.sensor("battery_soc").native_value, 97)
+            self.assertEqual(self.sensor("charging_status").native_value, "NOCHARGING")
+            self.assertEqual(self.sensor("charging_method").native_value, "AC")
+            self.assertEqual(self.sensor("battery_soc").extra_state_attributes["timestamp"], "stored-time")
+        self.api.async_get_telematic_data.assert_not_awaited()
+        self.api.async_list_containers.assert_not_awaited()
+        self.api.async_get_container_descriptors.assert_not_awaited()
+        self.assertEqual(self.entry.data[C.CONF_REST_REQUEST_STATE]["count"], 3)
+
+    async def test_rest_cache_preserves_failure_unavailability_across_reload(self):
+        await self.coordinator.async_refresh_rest()
+        Clock.current += timedelta(hours=2)
+        self.api.async_get_telematic_data.side_effect = MODULES.api.BmwCarDataApiError("offline")
+        await self.coordinator.async_refresh_rest()
+        self.api.async_get_telematic_data.reset_mock()
+        Clock.current += timedelta(minutes=10)
+        self.coordinator = self.make_coordinator()
+        await self.coordinator.async_initialize()
+        self.assertFalse(self.sensor("battery_soc").available)
+        self.assertFalse(self.sensor("charging_status").available)
+        self.assertTrue(self.sensor("odometer").available)
+        self.api.async_get_telematic_data.assert_not_awaited()
+        self.assertEqual(self.entry.data[C.CONF_REST_REQUEST_STATE]["count"], 4)
+
+    async def test_rest_cache_does_not_hide_a_persisted_quota_failure(self):
+        await self.coordinator.async_refresh_rest()
+        self.entry.data[C.CONF_REST_REQUEST_STATE]["count"] = 50
+        Clock.current += timedelta(hours=2)
+        await self.coordinator.async_refresh_rest()
+        self.api.async_get_telematic_data.reset_mock()
+        self.coordinator = self.make_coordinator()
+        await self.coordinator.async_initialize()
+        self.assertFalse(self.sensor("battery_soc").available)
+        self.assertTrue(self.entry.data[C.CONF_REST_REQUEST_STATE]["blocked"])
+        self.assertEqual(self.entry.data[C.CONF_REST_REQUEST_STATE]["count"], 50)
+        self.api.async_get_telematic_data.assert_not_awaited()
+
+    async def test_rest_cache_absent_on_upgrade_does_not_bypass_the_cooldown(self):
+        self.entry.data[C.CONF_REST_REQUEST_STATE] = {
+            "date": "2026-01-01", "count": 1,
+            "last_attempt_by_vin": {VIN: Clock.current.isoformat()},
+            "container_id": "test-container", "container_checked_date": "2026-01-01",
+        }
+        self.coordinator = self.make_coordinator()
+        await self.coordinator.async_initialize()
+        self.assertFalse(self.sensor("battery_soc").available)
+        self.api.async_get_telematic_data.assert_not_awaited()
+        Clock.current += timedelta(hours=2)
+        await self.coordinator.async_refresh_rest()
+        self.assertTrue(self.sensor("battery_soc").available)
+        self.assertEqual(self.entry.data[C.CONF_REST_DATA_BY_VIN][VIN][C.REST_BATTERY_LEVEL]["value"], "97")
+        self.assertEqual(self.entry.data[C.CONF_REST_REQUEST_STATE]["count"], 2)
+
+    async def test_rest_cache_rejects_invalid_saved_entries_with_an_error(self):
+        self.entry.data[C.CONF_REST_DATA_BY_VIN] = {VIN: {C.REST_BATTERY_LEVEL: "invalid"}}
+        self.entry.data[C.CONF_REST_AVAILABLE_BY_VIN] = {VIN: True}
+        self.entry.data[C.CONF_STREAM_TOPIC] = "#"
+        with self.assertLogs(MODULES.coordinator.__name__, level="ERROR"):
+            self.coordinator = self.make_coordinator()
+        await self.coordinator.async_initialize()
+        self.assertFalse(self.sensor("battery_soc").available)
+        self.assertEqual(self.coordinator.data[C.CONF_MAPPINGS], [])
+        self.api.async_get_telematic_data.assert_not_awaited()
 
     async def test_only_selected_sensors_use_rest_and_mqtt_does_not_overwrite_them(self):
         await self.coordinator.async_refresh_rest()
@@ -658,6 +739,12 @@ class StreamLifecycleTests(unittest.IsolatedAsyncioTestCase):
         mqtt = ModuleType("aiomqtt")
         mqtt.Client = Mock(return_value=self.client)
         mqtt.MqttError = type("MqttError", (Exception,), {})
+        self.importer = AsyncMock(return_value=mqtt)
+        self.import_patch = patch.object(
+            MODULES.stream_manager, "async_import_module", self.importer
+        )
+        self.import_patch.start()
+        self.addCleanup(self.import_patch.stop)
         self.mqtt_patch = patch.dict(sys.modules, {"aiomqtt": mqtt})
         self.mqtt_patch.start()
         self.addCleanup(self.mqtt_patch.stop)
@@ -676,6 +763,25 @@ class StreamLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(task.done())
         self.assertIn(task, self.entry_tasks)
         self.assertEqual(self.client.topic, "account/#")
+
+    async def test_mqtt_background_stream_awaits_nonblocking_module_import(self):
+        started = asyncio.Event()
+        allowed = asyncio.Event()
+        mqtt = self.importer.return_value
+
+        async def deferred_import(_hass, _name):
+            started.set()
+            await allowed.wait()
+            return mqtt
+
+        self.importer.side_effect = deferred_import
+        await self.manager.async_start()
+        await asyncio.wait_for(started.wait(), 1)
+        self.assertFalse(self.client.subscribed.is_set())
+        await asyncio.wait_for(self.hass.async_block_till_done(), 1)
+        allowed.set()
+        await asyncio.wait_for(self.client.subscribed.wait(), 1)
+        self.importer.assert_awaited_once_with(self.hass, "aiomqtt")
 
     async def test_mqtt_background_stream_closes_on_entry_unload_and_ha_shutdown(self):
         for shutdown in (False, True):

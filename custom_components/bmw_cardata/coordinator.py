@@ -67,9 +67,39 @@ class BmwCarDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._token_manager = token_manager
         self._rest_lock = asyncio.Lock()
         self._rest_authorization_failed = False
-        self._rest_data_by_vin: dict[str, dict[str, dict[str, Any]]] = {}
-        self._rest_available_by_vin: dict[str, bool] = {}
+        self._rest_data_by_vin, self._rest_available_by_vin = self._restore_rest_snapshot()
         self._telematic_cache_by_vin: dict[str, dict[str, dict[str, Any]]] = {}
+
+    def _restore_rest_snapshot(
+        self,
+    ) -> tuple[dict[str, dict[str, dict[str, Any]]], dict[str, bool]]:
+        """Restore saved readings without treating failed requests as successful."""
+        saved = self._entry.data.get(CONF_REST_DATA_BY_VIN, {})
+        flags = self._entry.data.get(CONF_REST_AVAILABLE_BY_VIN, {})
+        restored: dict[str, dict[str, dict[str, Any]]] = {}
+        available: dict[str, bool] = {}
+        if not isinstance(saved, dict) or not isinstance(flags, dict):
+            self.logger.error("Invalid saved BMW REST snapshot or availability state")
+            return restored, available
+        for vin, values in saved.items():
+            if (
+                not isinstance(vin, str) or not vin or not isinstance(values, dict)
+                or any(
+                    not isinstance(key, str) or not isinstance(value, dict)
+                    for key, value in values.items()
+                )
+            ):
+                self.logger.error("Discarding invalid saved BMW REST vehicle data")
+                continue
+            restored[vin] = {
+                key: dict(values[key]) for key in REST_SENSOR_KEYS if key in values
+            }
+            flag = flags.get(vin, False)
+            if not isinstance(flag, bool):
+                self.logger.error("Invalid saved BMW REST vehicle availability")
+                flag = False
+            available[vin] = flag
+        return restored, available
 
     @property
     def use_rest(self) -> bool:
@@ -82,12 +112,16 @@ class BmwCarDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return self._stream_manager.enabled
 
     async def async_initialize(self) -> None:
-        """Initialize empty state and start the MQTT listener."""
+        """Publish saved REST readings and start the MQTT listener."""
         self.async_set_updated_data(self._build_payload())
         await self._stream_manager.async_start()
         if self.use_rest:
             scope = self._entry.data.get(CONF_SCOPE, "")
             if REST_SCOPE not in scope.split():
+                self._rest_available_by_vin = {
+                    vin: False for vin in self._rest_data_by_vin
+                }
+                self._publish_rest_snapshot()
                 self.logger.warning(
                     "REST sensors require cardata:api:read; starting reauthorization"
                 )
@@ -173,7 +207,7 @@ class BmwCarDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 }
                 if not self._handle_rest_error(err, state):
                     self.logger.warning("BMW REST container setup unavailable: %s", err)
-                self.async_set_updated_data(self._build_payload())
+                self._publish_rest_snapshot()
                 return
 
             for vin in due_vins:
@@ -198,7 +232,22 @@ class BmwCarDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         key: telematic[key] for key in REST_SENSOR_KEYS if key in telematic
                     }
                     self._rest_available_by_vin[vin] = True
-            self.async_set_updated_data(self._build_payload())
+            self._publish_rest_snapshot()
+
+    def _publish_rest_snapshot(self) -> None:
+        """Persist readings and failure status together before notifying entities."""
+        self.hass.config_entries.async_update_entry(
+            self._entry,
+            data={
+                **self._entry.data,
+                CONF_REST_DATA_BY_VIN: {
+                    vin: {key: dict(value) for key, value in values.items()}
+                    for vin, values in self._rest_data_by_vin.items()
+                },
+                CONF_REST_AVAILABLE_BY_VIN: dict(self._rest_available_by_vin),
+            },
+        )
+        self.async_set_updated_data(self._build_payload())
 
     async def _async_get_rest_container(
         self, token: str, state: dict[str, Any]
@@ -320,6 +369,8 @@ class BmwCarDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _build_stream_mappings(self) -> list[dict[str, str]]:
         """Build vehicle mappings from the configured topic and received VINs."""
         vins = set(self._telematic_cache_by_vin)
+        if self.use_rest:
+            vins.update(self._rest_data_by_vin)
         stream_topic = self._entry.options.get(
             CONF_STREAM_TOPIC,
             self._entry.data.get(CONF_STREAM_TOPIC, DEFAULT_STREAM_TOPIC),
