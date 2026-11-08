@@ -30,6 +30,13 @@ Home Assistant 2024.6.0 or newer is required.
   minimal container when none is compatible. Existing containers are never changed or deleted.
 - Sends no remote vehicle commands.
 
+## Device overview
+
+Each discovered BMW has its own device page, with vehicle readings, the optional
+REST refresh button and diagnostics grouped together.
+
+![BMW CarData device page showing vehicle sensors, REST refresh and diagnostics](custom_components/bmw_cardata/media/printscreencardata1.png)
+
 ## Install with HACS
 
 1. In HACS, open **Integrations**.
