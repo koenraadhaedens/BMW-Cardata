@@ -5,14 +5,14 @@
     "@koenraadhaedens"
   ],
   "config_flow": true,
-  "documentation": "https://github.com/koenraadhaedens/bmw-cardata-homeassistant",
-  "issue_tracker": "https://github.com/koenraadhaedens/bmw-cardata-homeassistant/issues",
+  "documentation": "https://github.com/koenraadhaedens/BMW-Cardata",
+  "iot_class": "cloud_push",
+  "issue_tracker": "https://github.com/koenraadhaedens/BMW-Cardata/issues",
+  "loggers": [
+    "custom_components.bmw_cardata"
+  ],
   "requirements": [
     "aiomqtt>=2.1.0"
   ],
-  "iot_class": "cloud_push",
-  "version": "1.2.4",
-  "loggers": [
-    "custom_components.bmw_cardata"
-  ]
+  "version": "1.2.4"
 }

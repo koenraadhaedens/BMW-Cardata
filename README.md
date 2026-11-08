@@ -1,7 +1,17 @@
-# BMW-Cardata
 # BMW CarData Home Assistant Integration (HACS)
 
 Custom Home Assistant integration for BMW CarData authentication using OAuth2 Device Code Flow.
+
+This is an unofficial community integration, not affiliated with or endorsed by BMW.
+
+## Availability
+
+BMW's [official integration guide](https://bmw-cardata.bmwgroup.com/customer/public/api-documentation)
+requires a vehicle assigned to a supported market (EU), an active vehicle SIM,
+an active ConnectedDrive contract and a vehicle mapped to your account.
+The HACS country list therefore covers the 27 EU member states. Availability in
+other markets is not claimed; vehicle eligibility and fields still depend on BMW.
+Home Assistant 2024.6.0 or newer is required.
 
 ## What this does
 
@@ -140,3 +150,29 @@ or REST reading values. Do not reset the integration or its counter to force ret
 With `aiohttp` and `voluptuous` available, run `python -m unittest discover -s tests -v`.
 The focused tests mock Home Assistant interfaces; they do not start Home Assistant
 or call BMW services.
+
+## HACS default-list submission
+
+This repository is currently installed as a custom repository. Inclusion in the
+default list requires review by HACS; it is not automatic.
+
+Before submitting, follow the [HACS inclusion requirements](https://hacs.xyz/docs/publish/include/):
+
+1. Set a GitHub repository description and topics, and keep issues enabled.
+2. Push the preparation changes and verify both jobs in the **Validate** workflow
+   pass: HACS (without ignored checks) and Hassfest.
+3. Publish a new stable GitHub release containing these changes **after** validation
+   succeeds. Older releases do not contain the submission metadata.
+4. Fork `hacs/default` and create a new branch from its `master` branch.
+5. Add `"koenraadhaedens/BMW-Cardata"` alphabetically to its `integration` JSON list.
+6. Open an editable pull request as the repository owner or a major contributor.
+   Complete the upstream checklist honestly and link the new release and both
+   successful validation runs. Do not request reviewers.
+
+HACS review can take months. Users can continue installing the custom repository
+while the submission is pending.
+
+## License
+
+The integration code is licensed under the [MIT License](LICENSE). BMW names and
+brand assets remain subject to their respective owners' rights.
