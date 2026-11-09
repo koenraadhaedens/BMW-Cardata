@@ -40,8 +40,7 @@
         "description": "REST reads battery level, charging status and charging method every two hours. Container selection and creation are automatic. MQTT defaults to # for all vehicles; optionally enter a narrower topic. Disable REST for MQTT-only operation.",
         "data": {
           "stream_topic": "Stream topic (optional; defaults to #)",
-          "use_rest": "Enable REST battery and charging sensors",
-          "verbose_logging": "Verbose logging (writes bmw_cardata.log to /config)"
+          "use_rest": "Enable REST battery and charging sensors"
         }
       }
     }

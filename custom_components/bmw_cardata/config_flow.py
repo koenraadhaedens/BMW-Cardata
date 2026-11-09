@@ -23,8 +23,6 @@ from .const import (
     CONF_SCOPE,
     CONF_STREAM_TOPIC,
     CONF_TOKEN_EXPIRES_AT,
-    CONF_VERBOSE_LOGGING,
-    DEFAULT_VERBOSE_LOGGING,
     DEFAULT_SCOPE,
     DEFAULT_STREAM_TOPIC,
     DOMAIN,
@@ -253,7 +251,6 @@ class BmwCarDataOptionsFlow(config_entries.OptionsFlow):
                     data={
                         CONF_STREAM_TOPIC: stream_topic,
                         CONF_USE_REST: bool(user_input.get(CONF_USE_REST, False)),
-                        CONF_VERBOSE_LOGGING: bool(user_input.get(CONF_VERBOSE_LOGGING, DEFAULT_VERBOSE_LOGGING)),
                     },
                 )
 
@@ -267,10 +264,6 @@ class BmwCarDataOptionsFlow(config_entries.OptionsFlow):
                 vol.Optional(
                     CONF_USE_REST,
                     default=current_options.get(CONF_USE_REST, False),
-                ): bool,
-                vol.Optional(
-                    CONF_VERBOSE_LOGGING,
-                    default=current_options.get(CONF_VERBOSE_LOGGING, DEFAULT_VERBOSE_LOGGING),
                 ): bool,
             }
         )

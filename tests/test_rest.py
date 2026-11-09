@@ -168,6 +168,43 @@ C = MODULES.const
 VIN = "WBA00000000000001"
 
 
+class IntegrationLoggingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_setup_and_unload_leave_logging_to_home_assistant(self):
+        logger = logging.getLogger("custom_components.bmw_cardata")
+        for verbose in (False, True):
+            with self.subTest(legacy_verbose_logging=verbose):
+                entry = SimpleNamespace(
+                    entry_id="test",
+                    data={"verbose_logging": verbose},
+                    options={"verbose_logging": verbose},
+                    async_on_unload=Mock(),
+                    add_update_listener=Mock(),
+                )
+                hass = SimpleNamespace(
+                    data={},
+                    async_add_executor_job=AsyncMock(
+                        side_effect=lambda job, *args: job(*args)
+                    ),
+                    config_entries=SimpleNamespace(
+                        async_forward_entry_setups=AsyncMock(),
+                        async_unload_platforms=AsyncMock(return_value=True),
+                    ),
+                )
+                stream = SimpleNamespace(async_stop=AsyncMock())
+                coordinator = SimpleNamespace(async_initialize=AsyncMock())
+                with (
+                    patch.object(MODULES.integration, "BmwCarDataTokenManager"),
+                    patch.object(MODULES.integration, "BmwCarDataStreamManager", return_value=stream),
+                    patch.object(MODULES.integration, "BmwCarDataCoordinator", return_value=coordinator),
+                    patch.object(logger, "setLevel", side_effect=AssertionError("Logger level changed")),
+                    patch.object(logger, "addHandler", side_effect=AssertionError("Handler added")),
+                    patch.object(logger, "removeHandler", side_effect=AssertionError("Handler removed")),
+                ):
+                    self.assertTrue(await MODULES.integration.async_setup_entry(hass, entry))
+                    self.assertTrue(await MODULES.integration.async_unload_entry(hass, entry))
+                stream.async_stop.assert_awaited_once()
+
+
 class VehicleEntityTests(unittest.IsolatedAsyncioTestCase):
     async def test_all_platforms_group_existing_and_new_vehicles_without_duplicates(self):
         entry = SimpleNamespace(entry_id="test", async_on_unload=Mock())

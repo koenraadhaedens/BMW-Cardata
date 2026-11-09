@@ -204,8 +204,17 @@ starts a new two-hour automatic cooldown for that vehicle, including after a fai
 snapshot request. Other vehicles and MQTT are unaffected. BMW still returns its
 latest stored values; this button does not wake the car or command a live measurement.
 
-For unavailable REST sensors, enable verbose logging in integration options. The
-integration log reports whether polling is waiting for MQTT vehicle discovery,
+For unavailable REST sensors, enable debug logging through Home Assistant's
+`logger` configuration:
+
+```yaml
+logger:
+  logs:
+    custom_components.bmw_cardata: debug
+```
+
+Logs use Home Assistant's logging handlers; no separate `bmw_cardata.log` is created.
+The integration log reports whether polling is waiting for MQTT vehicle discovery,
 reauthorization, the daily quota reset, or a per-vehicle cooldown. Cooldown entries
 include the earliest eligible request time and whether saved readings exist; times
 use UTC (`+00:00`). The periodic check runs every two hours from setup/reload, so

@@ -46,9 +46,6 @@ CONF_STREAM_TOPIC = "stream_topic"
 DEFAULT_STREAM_HOST = "customer.streaming-cardata.bmwgroup.com"
 DEFAULT_STREAM_PORT = 9000
 DEFAULT_STREAM_TOPIC = "#"
-DEFAULT_VERBOSE_LOGGING = False
-
-CONF_VERBOSE_LOGGING = "verbose_logging"
 
 ERROR_AUTHORIZATION_PENDING = "authorization_pending"
 ERROR_SLOW_DOWN = "slow_down"
